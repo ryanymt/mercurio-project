@@ -1,0 +1,14 @@
+[
+  {"email": "dispatcher@your-project-id.iam.gserviceaccount.com", "role": "dispatcher"},
+  {"email": "dev-foreman@your-project-id.iam.gserviceaccount.com", "role": "dev", "project": "foreman"},
+  {"email": "qa-foreman@your-project-id.iam.gserviceaccount.com", "role": "qa", "project": "foreman"},
+  {"email": "spec-foreman@your-project-id.iam.gserviceaccount.com", "role": "spec", "project": "foreman"},
+  {"email": "architect-foreman@your-project-id.iam.gserviceaccount.com", "role": "architect", "project": "foreman"},
+  {"email": "integrator-foreman@your-project-id.iam.gserviceaccount.com", "role": "integrator", "project": "foreman"},
+  {"email": "dev-sandbox@your-project-id.iam.gserviceaccount.com", "role": "dev", "project": "sandbox"},
+  {"email": "qa-sandbox@your-project-id.iam.gserviceaccount.com", "role": "qa", "project": "sandbox"},
+  {"email": "spec-sandbox@your-project-id.iam.gserviceaccount.com", "role": "spec", "project": "sandbox"},
+  {"email": "architect-sandbox@your-project-id.iam.gserviceaccount.com", "role": "architect", "project": "sandbox"},
+  {"email": "integrator-sandbox@your-project-id.iam.gserviceaccount.com", "role": "integrator", "project": "sandbox"},
+  {"email": "operator@example.com", "role": "human"}
+]

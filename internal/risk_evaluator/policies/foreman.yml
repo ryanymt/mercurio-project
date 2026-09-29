@@ -1,0 +1,129 @@
+# foreman risk policy
+#
+# Evaluated deterministically. Any rule that matches escalates the ticket to the
+# human. Boolean OR only -- there is no scoring and no summed threshold.
+#
+# READ docs/risk-policy.md BEFORE EDITING.
+#
+# This file is embedded in the binary (internal/risk_evaluator, go:embed) and chosen
+# by project id: this is foreman's. It is never read from a working tree or chosen
+# by a database column. Editing it in a branch changes nothing until a human
+# promotes a new image. It is itself on the protected path list, so any change to it
+# escalates.
+#
+# Rules may be ADDED by an agent. Rules may not be removed, weakened, or narrowed
+# by an agent. The six starter rule ids and the meta-project paths are compiled into
+# the evaluator, so this file cannot drop them; comparing it with the promoted
+# policy on load arrives with promotions (P09).
+#
+# Patterns are anchored at the repository root; ** spans any number of directories,
+# none included; case is ignored (docs/risk-policy.md, "Matching"). The matchers in
+# one rule are OR'd. The file is decoded strictly: unknown or duplicate keys, or a
+# fail_closed other than the plain scalar true, and every evaluation escalates.
+
+version: 1
+
+# Fail closed. Do not set this to false. Present as an explicit declaration so its
+# removal is visible in a diff.
+fail_closed: true
+
+rules:
+
+  - id: protected_paths
+    reason: "Touches a path that requires human review"
+    match:
+      any_path:
+        - "auth/**"
+        - "**/auth/**"
+        - "**/migrations/**"
+        - "infra/**"
+        - "terraform/**"
+        - ".github/**"
+        - "**/Dockerfile"
+        - "**/secrets*"
+        - "**/*.pem"
+        - "**/*credentials*"
+
+  - id: size
+    reason: "Change is large enough to warrant a human read"
+    match:
+      files_changed_gt: 15
+      lines_changed_gt: 600
+
+  - id: dependency_change
+    reason: "Adds, removes, or bumps a dependency"
+    match:
+      any_path:
+        - "**/package.json"
+        - "**/package-lock.json"
+        - "**/pnpm-lock.yaml"
+        - "**/yarn.lock"
+        - "**/requirements*.txt"
+        - "**/pyproject.toml"
+        - "**/poetry.lock"
+        - "**/uv.lock"
+        - "**/go.mod"
+        - "**/go.sum"
+        - "**/Cargo.toml"
+        - "**/Cargo.lock"
+        - "**/go.work"
+        - "**/go.work.sum"
+        - "**/vendor/modules.txt"
+
+  # test_integrity, surface_change and scope_drift are evaluated from P08. Until then
+  # each always matches ("not evaluated until P08"), so every approval escalates.
+  - id: test_integrity
+    reason: "Weakens the test suite"
+    match:
+      test_file_deleted: true
+      test_skipped_or_pending_added: true
+      coverage_drop_pct_gt: 1.0
+
+  - id: surface_change
+    reason: "Changes a public or persisted interface"
+    match:
+      any_path:
+        - "**/openapi*.yml"
+        - "**/openapi*.yaml"
+        - "**/schema.sql"
+        - "**/*.proto"
+        - "**/config/**"
+        - "**/.env.example"
+
+  - id: scope_drift
+    reason: "Changed files not implicated by any acceptance criterion"
+    match:
+      unimplicated_files_gt: 0
+
+
+# Added to protected_paths for a meta-project (foreman is one, compiled in; or any
+# project with projects.is_meta = true). The evaluator adds this same list from its
+# own code (internal/risk_evaluator/meta.go) whatever this file says, so an entry
+# here can only add to it; this copy is for readers.
+meta_project:
+  protected_paths:
+    - "**/risk_evaluator/**"
+    - "**/callback_api/**"
+    - "cmd/foreman/**"
+    - "internal/db/**"
+    - "Makefile"
+    - "cloudbuild.yaml"
+    - "**/dispatcher/**"
+    - "**/rollback.sh"
+    - "**/escalation*"
+    - "**/escalation*/**"
+    - "**/parking*"
+    - "**/parking*/**"
+    - "**/CLAUDE.md"
+    - "docs/architecture.md"
+    - "docs/state-machine.md"
+    - "docs/risk-policy.md"
+    - "**/model-policy.yml"
+    - "**/.gitattributes"
+    - ".claude/**"
+    - ".mcp.json"
+
+
+# Thresholds above are first guesses. Tune from what the viewer shows actually
+# firing, not from intuition. A rule that fires on genuine risk and annoys you is
+# working correctly.

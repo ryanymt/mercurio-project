@@ -1,0 +1,45 @@
+# foreman's two images, built from the committed tree and pushed to Artifact Registry by `make
+# images`, which passes _REPO (<region>-docker.pkg.dev/<project>/foreman) and the builder account,
+# then writes the images' digests into infra/images.auto.tfvars for Terraform. Each image is checked
+# before anything is pushed: it runs as a non-root user, its git is 2.41 or later (the risk
+# evaluator's git runner refuses older), and it completes an https request.
+#
+# The build runs as `builder` (infra/identities.tf), which can read the staged source, push to the
+# `foreman` repository and write logs, and nothing more. With a named account, logs go to Cloud
+# Logging only.
+steps:
+  - id: build-foreman
+    name: gcr.io/cloud-builders/docker@sha256:bbb3d633c5c2813b2ce5245852979e1d637768f4acfc504d8ece288f91e9b60f
+    args: [build, --file, Dockerfile, --tag, '${_REPO}/foreman:${_TAG}', .]
+  - id: build-echo-runner
+    name: gcr.io/cloud-builders/docker@sha256:bbb3d633c5c2813b2ce5245852979e1d637768f4acfc504d8ece288f91e9b60f
+    args: [build, --file, cmd/echo-runner/Dockerfile, --tag, '${_REPO}/echo-runner:${_TAG}', .]
+    waitFor: ['-']
+  - id: check
+    name: gcr.io/cloud-builders/docker@sha256:bbb3d633c5c2813b2ce5245852979e1d637768f4acfc504d8ece288f91e9b60f
+    waitFor: [build-foreman, build-echo-runner]
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        for image in '${_REPO}/foreman:${_TAG}' '${_REPO}/echo-runner:${_TAG}'; do
+          uid=$$(docker run --rm --entrypoint id "$$image" -u)
+          if [ "$$uid" = 0 ]; then echo "check: $$image runs as root" >&2; exit 1; fi
+          version=$$(docker run --rm --entrypoint git "$$image" --version | awk '{print $$3}')
+          if [ "$$(printf '2.41.0\n%s\n' "$$version" | sort -V | head -n1)" != 2.41.0 ]; then
+            echo "check: $$image has git $$version, older than 2.41" >&2; exit 1
+          fi
+          docker run --rm --entrypoint git "$$image" ls-remote --exit-code https://github.com/git/git.git HEAD >/dev/null
+          echo "check: $$image runs as uid $$uid, has git $$version, and reached github.com over https"
+        done
+images:
+  - '${_REPO}/foreman:${_TAG}'
+  - '${_REPO}/echo-runner:${_TAG}'
+substitutions:
+  _REPO: ''
+  _TAG: ''
+options:
+  logging: CLOUD_LOGGING_ONLY
+  substitutionOption: MUST_MATCH
+timeout: 1200s

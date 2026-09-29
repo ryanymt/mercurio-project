@@ -1,0 +1,16 @@
+# Build output. `make build` writes bin/; a bare `go build ./...` drops ./foreman.
+/bin/
+/foreman
+
+# Terraform working state and your deployment's values. Real state lives in the GCS backend.
+infra/.terraform/
+infra/terraform.tfvars
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+
+# Key material and local environment never belong here: the GitHub App's private key goes into
+# Secret Manager, and the downloaded file is deleted.
+*.pem
+.env

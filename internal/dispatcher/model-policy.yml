@@ -1,0 +1,22 @@
+# The tier table (docs/architecture.md, "Model backends"; P04 D11): which provider, model and
+# credential a runner gets, by role and attempt. For dev the attempt is the one it starts; for QA,
+# the dev attempt it judges. The integrator runs no model and has no tier.
+#
+# Protected (**/model-policy.yml and the dispatcher's package): it decides which model acts as QA,
+# so lowering a tier weakens a gate. The table refuses to load, and nothing launches, if QA's rank
+# is ever below the rank of the dev tier it judges. Ranks: GLM-5.3 Flash 1, Claude Sonnet 5 3,
+# Claude Opus 5.5 4. Every provider names its `budget` row. The credential is the name of the one
+# secret a launch injects.
+#
+# Decided with the user, 2026-09-26: dev on GLM-5.3 Flash, then Claude Sonnet 5; QA, spec and
+# architect on Claude Opus 5.5; the attempt cap stays 2.
+version: 1
+tiers:
+  - {role: spec, attempt: 1, tier: spec-opus, provider: anthropic, model: claude-opus-5-5, rank: 4, credential: claude-oauth-token}
+  - {role: spec, attempt: 2, tier: spec-opus, provider: anthropic, model: claude-opus-5-5, rank: 4, credential: claude-oauth-token}
+  - {role: architect, attempt: 1, tier: architect-opus, provider: anthropic, model: claude-opus-5-5, rank: 4, credential: claude-oauth-token}
+  - {role: architect, attempt: 2, tier: architect-opus, provider: anthropic, model: claude-opus-5-5, rank: 4, credential: claude-oauth-token}
+  - {role: dev, attempt: 1, tier: dev-glm-flash, provider: zai, model: glm-5.3-flash, rank: 1, credential: zai-api-key}
+  - {role: dev, attempt: 2, tier: dev-sonnet, provider: anthropic, model: claude-sonnet-5, rank: 3, credential: claude-oauth-token}
+  - {role: qa, attempt: 1, tier: qa-opus, provider: anthropic, model: claude-opus-5-5, rank: 4, credential: claude-oauth-token}
+  - {role: qa, attempt: 2, tier: qa-opus, provider: anthropic, model: claude-opus-5-5, rank: 4, credential: claude-oauth-token}

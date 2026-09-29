@@ -1,0 +1,10 @@
+# Copy to terraform.tfvars (git-ignored) and fill in. `make images` writes the two image digests to
+# images.auto.tfvars; do not set them here.
+
+project_id     = "your-project-id"
+project_number = "123456789012" # gcloud projects describe your-project-id --format='value(projectNumber)'
+region         = "us-central1"
+
+# Optional: a monthly budget on the project, alerting at 50%, 90% and 100% of current spend.
+# billing_account    = "XXXXXX-XXXXXX-XXXXXX"
+# monthly_budget_usd = 50
