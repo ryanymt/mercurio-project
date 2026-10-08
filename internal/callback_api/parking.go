@@ -20,6 +20,7 @@ type ParkingRequest struct {
 	Parked       bool
 	Reason       string     // required when parking
 	Until        *time.Time // optional; must be in the future by the database's clock
+	EscalatedAt  *time.Time // required: the escalation the page showed (P06 D19)
 	RequestID    string
 	Method, Path string
 }
@@ -49,6 +50,9 @@ func (e *Engine) Park(ctx context.Context, tx *sql.Tx, req ParkingRequest) (Park
 	if !req.Parked && (req.Reason != "" || req.Until != nil) {
 		return ParkingResult{}, refuse(400, "unparking takes no reason or date")
 	}
+	if req.EscalatedAt == nil {
+		return ParkingResult{}, refuse(400, "parking names the escalation it decides: escalated_at")
+	}
 	if req.Caller.Role != RoleHuman {
 		return ParkingResult{}, refuse(403, "only a human may park or unpark a ticket")
 	}
@@ -58,7 +62,7 @@ func (e *Engine) Park(ctx context.Context, tx *sql.Tx, req ParkingRequest) (Park
 		until = req.Until.UTC()
 	}
 	hash := requestHash(map[string]any{"method": req.Method, "path": req.Path, "ticket": req.TicketID,
-		"parked": req.Parked, "reason": req.Reason, "until": until})
+		"parked": req.Parked, "reason": req.Reason, "until": until, "escalated_at": escalationKey(req.EscalatedAt)})
 	replay, err := claimRequest(ctx, tx, req.Caller.Email, req.RequestID, hash)
 	if err != nil {
 		return ParkingResult{}, err
@@ -79,6 +83,9 @@ func (e *Engine) Park(ctx context.Context, tx *sql.Tx, req ParkingRequest) (Park
 	if t.State != StateEscalated {
 		return ParkingResult{}, refuse(409, "ticket %d is %s: only an escalated ticket is parked", t.ID, t.State)
 	}
+	if err := sameEscalation(t, *req.EscalatedAt); err != nil {
+		return ParkingResult{}, err
+	}
 	var reason any
 	if req.Parked {
 		reason = req.Reason
@@ -96,7 +103,7 @@ func (e *Engine) Park(ctx context.Context, tx *sql.Tx, req ParkingRequest) (Park
 	if err != nil {
 		return ParkingResult{}, internal("park ticket", err)
 	}
-	payload := map[string]any{"parked": req.Parked}
+	payload := map[string]any{"parked": req.Parked, "bound_to": map[string]any{"escalated_at": escalationKey(req.EscalatedAt)}}
 	if req.Parked {
 		payload["reason"] = req.Reason
 		if req.Until != nil {

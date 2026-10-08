@@ -20,8 +20,8 @@ func isMetaProject(id string) bool {
 // metaProtectedPaths are protected for every meta-project, added to `protected_paths` whatever the
 // policy file says: the evaluator and its policies, every file of the callback API and dispatcher
 // packages, the command, the package every write goes through, the build and what builds the
-// images, and the documents and settings an agent session reads (docs/CLAUDE.md, "Protected
-// paths").
+// images, the viewer, the transcript capture and its scrubber, the runner, and the documents and
+// settings an agent session reads (docs/CLAUDE.md, "Protected paths").
 func metaProtectedPaths() []string {
 	return []string{
 		"**/risk_evaluator/**",
@@ -31,6 +31,9 @@ func metaProtectedPaths() []string {
 		"Makefile",
 		"cloudbuild.yaml",
 		"**/dispatcher/**",
+		"**/viewer/**",
+		"**/capture/**",
+		"**/runner/**",
 		"**/rollback.sh",
 		"**/escalation*",
 		"**/escalation*/**",

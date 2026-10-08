@@ -7,6 +7,8 @@
 //	New(t) *sql.DB                  a fresh database with every migration applied, seed rows included
 //	NewAsApp(t) (owner, app *sql.DB) the same, with a second pool connected as `app`, the deployed
 //	                                 components' user, which holds only the rights 00007 grants
+//	NewAsViewer(t) (owner, viewer *sql.DB) the same, connected as `viewer`, the viewer's read-only
+//	                                 user, which holds only the rights 00008 grants
 //	Empty(t) string                 the URL of a fresh, empty database, for testing the migration runner
 //
 // Both are dropped when the test ends. New's databases are clones of a template built once from
@@ -45,9 +47,12 @@ import (
 const (
 	appRole     = "app"
 	appPassword = "foreman-test-app"
+	// The viewer's read-only user (P06 D7), created the same way for migration 00008's grants.
+	viewerRole     = "viewer"
+	viewerPassword = "foreman-test-viewer"
 	// setupVersion is part of the template's name: a template built by an older testdb, before the
-	// role existed, is never reused.
-	setupVersion = "2"
+	// roles existed, is never reused.
+	setupVersion = "3"
 )
 
 // buildLockKey is the advisory lock taken while a template is built. Any constant works, as long
@@ -84,6 +89,29 @@ func NewAsApp(tb testing.TB) (owner, app *sql.DB) {
 	}
 	u.User = url.UserPassword(appRole, appPassword)
 	return openFor(tb, name), openURL(tb, u.String())
+}
+
+// NewAsViewer returns a new database like New's, with two pools: the test server's own user, and
+// `viewer`, which holds only the rights migration 00008 grants. ViewerURL gives the second's URL.
+func NewAsViewer(tb testing.TB) (owner, viewer *sql.DB) {
+	tb.Helper()
+	owner, u := NewViewerURL(tb)
+	return owner, openURL(tb, u)
+}
+
+// NewViewerURL returns a new database like New's: a pool as the server's own user, and the URL that
+// connects as `viewer`, for a command that opens its own pool.
+func NewViewerURL(tb testing.TB) (owner *sql.DB, viewerURL string) {
+	tb.Helper()
+	start(tb)
+	name := uniqueName("foreman_test")
+	createDatabase(tb, name, template)
+	u, err := url.Parse(withDatabase(base, name))
+	if err != nil {
+		tb.Fatalf("testdb: %v", err)
+	}
+	u.User = url.UserPassword(viewerRole, viewerPassword)
+	return openFor(tb, name), u.String()
 }
 
 // Empty returns the URL of a new, empty database: no schema, no goose version table.
@@ -136,14 +164,16 @@ func buildTemplate(ctx context.Context) (string, error) {
 	}
 	defer conn.ExecContext(context.Background(), "SELECT pg_advisory_unlock($1)", buildLockKey)
 
-	// The app role, before any template is migrated; idempotent, and under the lock, since test
-	// processes of every package share the server.
-	if _, err := conn.ExecContext(ctx, `DO $$ BEGIN
-		IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '`+appRole+`') THEN
-			CREATE ROLE `+appRole+` LOGIN PASSWORD '`+appPassword+`';
-		END IF;
-	END $$`); err != nil {
-		return "", fmt.Errorf("create the app role: %w", err)
+	// The app and viewer roles, before any template is migrated; idempotent, and under the lock,
+	// since test processes of every package share the server.
+	for _, r := range []struct{ role, password string }{{appRole, appPassword}, {viewerRole, viewerPassword}} {
+		if _, err := conn.ExecContext(ctx, `DO $$ BEGIN
+			IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '`+r.role+`') THEN
+				CREATE ROLE `+r.role+` LOGIN PASSWORD '`+r.password+`';
+			END IF;
+		END $$`); err != nil {
+			return "", fmt.Errorf("create the %s role: %w", r.role, err)
+		}
 	}
 
 	var done bool

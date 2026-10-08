@@ -1,0 +1,63 @@
+{{template "head" .T.Title}}
+<h1>#{{.T.ID}} {{.T.Title}}</h1>
+<section class="fields">
+<dl>
+<dt>project</dt><dd>{{.T.Project}}</dd>
+<dt>state</dt><dd class="state-{{.T.State}}">{{.T.State}}{{if .T.Parked}} (parked: {{.T.ParkedReason}}{{with .T.ParkedUntil}} until {{ts .}}{{end}}){{end}}</dd>
+<dt>priority</dt><dd>{{.T.Priority}}</dd>
+<dt>dev attempts</dt><dd>{{.T.Attempts}}</dd>
+{{with .T.Branch}}<dt>branch</dt><dd>{{.}}</dd>{{end}}
+{{with .T.BaseSHA}}<dt>base</dt><dd class="sha">{{.}}</dd>{{end}}
+{{with .T.HeadSHA}}<dt>head</dt><dd class="sha">{{.}} <a href="/tickets/{{$.T.ID}}/diff">the diff</a></dd>{{end}}
+{{with .T.FailureReason}}<dt>failed</dt><dd>{{.}}</dd>{{end}}
+<dt>created</dt><dd>{{ts .T.CreatedAt}}</dd>
+<dt>updated</dt><dd>{{ts .T.UpdatedAt}}</dd>
+</dl>
+{{with .T.Body}}<pre class="body">{{.}}</pre>{{end}}
+{{with .T.Criteria}}<h2>Acceptance criteria</h2><ul>{{range .}}<li><b>{{.ID}}</b> {{.Text}}</li>{{end}}</ul>{{end}}
+</section>
+
+{{with .T.EscalatedAt}}<section class="escalation">
+<h2>Last escalated</h2>
+<p>{{ts .}}{{if eq $.T.State "escalated"}}, and waiting{{end}}</p>
+{{with $.T.EscalationReason}}{{if $.ReasonByRunner}}<p class="runner-label">written by the {{$.EscalatedBy}} runner:</p><blockquote class="runner-text" title="written by the {{$.EscalatedBy}} runner">{{.}}</blockquote>{{else}}<p class="reason">{{.}}</p>{{end}}{{end}}
+</section>{{end}}
+
+<section class="verdict">
+<h2>Risk verdict</h2>
+{{with .Verdict}}<p class="{{if .Cleared}}good{{else}}bad{{end}}">{{if .Cleared}}cleared{{else}}not cleared{{end}}, evaluated {{ts .EvaluatedAt}}</p>
+<p>for base <span class="sha">{{.BaseSHA}}</span>, head <span class="sha">{{.HeadSHA}}</span></p>
+{{with .MatchedRules}}<ul class="rules">{{range .}}<li>{{.}}</li>{{end}}</ul>{{end}}
+{{with .Reason}}<p>{{.}}</p>{{end}}
+{{else}}<p>no verdict for this commit</p>{{if .StaleVerdict}}<p class="note">the stored verdict names another commit</p>{{end}}{{end}}
+</section>
+
+{{template "actions" .}}
+
+<section class="events">
+<h2>Events</h2>
+<table>
+<tr><th>at</th><th>move</th><th>by</th><th></th></tr>
+{{range .Events}}<tr><td>{{ts .At}}</td><td>{{with .From}}{{.}} → {{end}}{{.To}}</td><td>{{.Actor}}<br><small>{{.ActorID}}</small></td>
+<td>{{if .Reason}}{{if .ByRunner}}<p class="runner-label">written by the {{.Actor}} runner:</p><blockquote class="runner-text" title="written by the {{.Actor}} runner">{{.Reason}}</blockquote>{{else}}<p class="reason">{{.Reason}}</p>{{end}}{{end}}
+{{with .Payload}}<details><summary>payload</summary><pre>{{.}}</pre></details>{{end}}</td></tr>
+{{end}}</table>
+</section>
+
+<section class="attempts">
+<h2>Attempts</h2>
+<table>
+<tr><th>attempt</th><th>role</th><th>model</th><th>tier</th><th>started</th><th>ended</th><th>outcome</th><th>tokens in/out</th></tr>
+{{range .Attempts}}<tr><td>{{.Attempt}}</td><td>{{.Role}}</td><td>{{.Provider}} {{.Model}}</td><td>{{.Tier}}</td><td>{{ts .StartedAt}}</td><td>{{with .EndedAt}}{{ts .}}{{end}}</td><td>{{.Outcome}}</td><td>{{.TokensIn}}/{{.Out}}</td></tr>
+{{else}}<tr><td colspan="8">none</td></tr>
+{{end}}</table>
+</section>
+
+<section class="runs">
+<h2>Runs</h2>
+{{range .Runs}}<h3>attempt {{.Attempt}}, {{.Label}}</h3>
+<ul>{{range .Artifacts}}<li><a href="/tickets/{{.Ticket}}/artifacts/{{.ID}}">{{.Kind}}</a> <small>{{.Path}}</small></li>{{end}}</ul>
+{{else}}<p>none registered</p>
+{{end}}</section>
+<p class="who">signed in as {{.Person}}</p>
+{{template "foot"}}

@@ -3,9 +3,18 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/rsa"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-jose/go-jose/v4"
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/ryanymt/mercurio-project/internal/dispatcher"
@@ -277,6 +287,188 @@ func TestCallbackAPIRefusesAnHTTPKeyURL(t *testing.T) {
 	}
 }
 
+// `foreman callback-api` refuses an IAP key URL that is not https, before it listens (P06 T3).
+func TestCallbackAPIRefusesAnHTTPIAPKeyURL(t *testing.T) {
+	callbackAPIEnv(t)
+	t.Setenv("FOREMAN_IAP_AUDIENCE", "/projects/123456789012/locations/us-central1/services/viewer")
+	t.Setenv("FOREMAN_IAP_JWKS_URL", "http://www.gstatic.com/iap/verify/public_key-jwk")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var out, errs bytes.Buffer
+	if code := run(ctx, []string{"callback-api"}, &out, &errs); code != 2 {
+		t.Fatalf("exit %d, want 2\n%s", code, errs.String())
+	}
+	if strings.Contains(errs.String(), "listening") || !strings.Contains(errs.String(), "https") {
+		t.Fatalf("the refusal:\n%s", errs.String())
+	}
+}
+
+// `foreman callback-api` logs the viewer's IAP audience it accepts relayed people for; without
+// FOREMAN_IAP_AUDIENCE it still serves the runners, and warns that no person can act (P06 T3).
+func TestCallbackAPILogsWhoMayRelay(t *testing.T) {
+	for name, aud := range map[string]string{
+		"configured": "/projects/123456789012/locations/us-central1/services/viewer",
+		"unset":      "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			callbackAPIEnv(t)
+			t.Setenv("FOREMAN_IAP_AUDIENCE", aud)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			errs := &lockedBuffer{}
+			done := make(chan int, 1)
+			go func() {
+				var out bytes.Buffer
+				done <- run(ctx, []string{"callback-api"}, &out, errs)
+			}()
+			for deadline := time.Now().Add(10 * time.Second); !strings.Contains(errs.String(), "callback api listening"); {
+				if time.Now().After(deadline) {
+					t.Fatalf("the API never listened:\n%s", errs.String())
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			cancel()
+			if code := <-done; code != 0 {
+				t.Fatalf("exit %d\n%s", code, errs.String())
+			}
+			var listening struct {
+				IAPAudience *string `json:"iap_audience"`
+			}
+			warned := false
+			for _, l := range strings.Split(strings.TrimSpace(errs.String()), "\n") {
+				var line struct{ Level, Msg string }
+				json.Unmarshal([]byte(l), &line)
+				if line.Msg == "callback api listening" {
+					json.Unmarshal([]byte(l), &listening)
+				}
+				if line.Level == "WARN" && strings.Contains(line.Msg, "FOREMAN_IAP_AUDIENCE") {
+					warned = true
+				}
+			}
+			if listening.IAPAudience == nil || *listening.IAPAudience != aud {
+				t.Fatalf("the listening line's iap_audience, want %q:\n%s", aud, errs.String())
+			}
+			if warned != (aud == "") {
+				t.Fatalf("warned %v with the audience %q:\n%s", warned, aud, errs.String())
+			}
+			if strings.Contains(errs.String(), "human_audiences") {
+				t.Fatalf("a human audience is still reported:\n%s", errs.String())
+			}
+		})
+	}
+}
+
+// keyServer publishes keys as Google's and IAP's key URLs do, on loopback.
+func keyServer(t *testing.T, keys ...jose.JSONWebKey) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(jose.JSONWebKeySet{Keys: keys})
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+// signJWT signs claims with key under kid.
+func signJWT(t *testing.T, alg jose.SignatureAlgorithm, key any, kid string, claims map[string]any) string {
+	t.Helper()
+	s, err := jose.NewSigner(jose.SigningKey{Algorithm: alg, Key: jose.JSONWebKey{Key: key, KeyID: kid}},
+		(&jose.SignerOptions{}).WithType("JWT"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := json.Marshal(claims)
+	jws, err := s.Sign(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := jws.CompactSerialize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+// `foreman callback-api`, as deployed, takes a person relayed by the viewer: the viewer's own
+// Google token, and the person's IAP assertion for FOREMAN_IAP_AUDIENCE, verified with
+// FOREMAN_IAP_JWKS_URL's keys. The ticket is created as the person (P06 T3).
+func TestCallbackAPIAcceptsARelayedPerson(t *testing.T) {
+	_, conn := migrated(t)
+	google, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	iap, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const iapAudience = "/projects/123456789012/locations/us-central1/services/viewer"
+	t.Setenv("FOREMAN_SERVICE_AUDIENCE", callbackURL)
+	t.Setenv("FOREMAN_JWKS_URL", keyServer(t, jose.JSONWebKey{Key: &google.PublicKey, KeyID: "g", Algorithm: "RS256", Use: "sig"}))
+	t.Setenv("FOREMAN_IAP_JWKS_URL", keyServer(t, jose.JSONWebKey{Key: &iap.PublicKey, KeyID: "i", Algorithm: "ES256", Use: "sig"}))
+	t.Setenv("FOREMAN_IAP_AUDIENCE", iapAudience)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	t.Setenv("FOREMAN_ADDR", addr)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errs := &lockedBuffer{}
+	done := make(chan int, 1)
+	go func() {
+		var out bytes.Buffer
+		done <- run(ctx, []string{"callback-api"}, &out, errs)
+	}()
+	for deadline := time.Now().Add(10 * time.Second); !strings.Contains(errs.String(), "callback api listening"); {
+		if time.Now().After(deadline) {
+			t.Fatalf("the API never listened:\n%s", errs.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	now := time.Now()
+	viewerToken := signJWT(t, jose.RS256, google, "g", map[string]any{
+		"iss": "https://accounts.google.com", "aud": callbackURL, "sub": "1",
+		"email": "viewer@your-project-id.iam.gserviceaccount.com", "email_verified": true,
+		"iat": now.Unix(), "exp": now.Add(time.Hour).Unix(),
+	})
+	assertion := signJWT(t, jose.ES256, iap, "i", map[string]any{
+		"iss": "https://cloud.google.com/iap", "aud": iapAudience, "azp": iapAudience, "sub": "accounts.google.com:1",
+		"email": operator, "iat": now.Unix(), "exp": now.Add(10 * time.Minute).Unix(),
+	})
+	req, err := http.NewRequest("POST", "http://"+addr+"/v1/tickets",
+		strings.NewReader(`{"project": "foreman", "title": "relayed from the viewer"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+viewerToken)
+	req.Header.Set("X-Foreman-IAP-Assertion", assertion)
+	req.Header.Set("Idempotency-Key", newRequestID())
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status %d: %s\n%s", resp.StatusCode, body, errs.String())
+	}
+	var actor string
+	if err := conn.QueryRow(`SELECT actor_id FROM ticket_events ORDER BY id DESC LIMIT 1`).Scan(&actor); err != nil {
+		t.Fatal(err)
+	}
+	if actor != operator {
+		t.Fatalf("the ticket was created by %q, want the relayed person %s", actor, operator)
+	}
+	cancel()
+	if code := <-done; code != 0 {
+		t.Fatalf("exit %d\n%s", code, errs.String())
+	}
+}
+
 // At startup `foreman callback-api` compares the host's clock with the database's and logs the
 // skew, before it listens (P05 T4; [P02/review2]).
 func TestCallbackAPIChecksTheClockAtStartup(t *testing.T) {
@@ -323,77 +515,23 @@ func TestCallbackAPIChecksTheClockAtStartup(t *testing.T) {
 
 const operator = "operator@example.com" // the identity map's human
 
-// `foreman ticket create` makes a ticket through the core as a person the identity map knows, for
-// the operator to run as an execution of the dispatcher job (P05 T8: Cloud Run alters a person's
-// gcloud token, so the person's API path waits for P06). Without criteria it is a draft; with
-// them, ready. It prints the result as one JSON object.
-func TestTicketCreate(t *testing.T) {
-	_, conn := migrated(t)
-	ctx := context.Background()
-	for _, c := range []struct {
-		criteria string
-		state    string
-	}{
-		{"", "draft"},
-		{`[{"id": "AC1", "text": "it echoes"}]`, "ready"},
-	} {
-		args := []string{"ticket", "create", "--as", operator, "--project", "sandbox", "--title", "an echo, with commas, and spaces"}
-		if c.criteria != "" {
-			args = append(args, "--criteria", c.criteria)
-		}
-		var out, errs bytes.Buffer
-		if code := run(ctx, args, &out, &errs); code != 0 {
-			t.Fatalf("%v: exit %d\n%s", args, code, errs.String())
-		}
-		var res struct {
-			TicketID int64  `json:"ticket_id"`
-			Project  string `json:"project"`
-			State    string `json:"state"`
-		}
-		if err := json.Unmarshal(out.Bytes(), &res); err != nil || res.TicketID == 0 || res.Project != "sandbox" || res.State != c.state {
-			t.Fatalf("output %q (%v), want a %s ticket in sandbox", out.String(), err, c.state)
-		}
-		var title, state, actor, actorID string
-		if err := conn.QueryRow(`SELECT t.title, t.state, e.actor, e.actor_id FROM tickets t JOIN ticket_events e ON e.ticket_id = t.id
-			WHERE t.id = $1`, res.TicketID).Scan(&title, &state, &actor, &actorID); err != nil {
-			t.Fatal(err)
-		}
-		if title != "an echo, with commas, and spaces" || state != c.state || actor != "human" || actorID != operator {
-			t.Fatalf("ticket %q %s, event by %s %s", title, state, actor, actorID)
-		}
+// `foreman ticket create` is gone: a person creates tickets from the viewer, as themselves (P06 T8).
+func TestTicketCreateIsRetired(t *testing.T) {
+	var out, errs bytes.Buffer
+	code := run(context.Background(), []string{"ticket", "create", "--as", operator, "--project", "sandbox", "--title", "t"}, &out, &errs)
+	if code != 2 || strings.Contains(errs.String(), "ticket create") {
+		t.Fatalf("exit %d, want 2 and a usage that does not name it:\n%s", code, errs.String())
 	}
 }
 
-// Whatever is missing or wrong stops the command, and no ticket is made.
-func TestTicketCreateRefusals(t *testing.T) {
-	_, conn := migrated(t)
-	ctx := context.Background()
-	base := []string{"ticket", "create", "--as", operator, "--project", "sandbox", "--title", "t"}
-	for name, c := range map[string]struct {
-		args []string
-		code int
-	}{
-		"no --as":             {[]string{"ticket", "create", "--project", "sandbox", "--title", "t"}, 2},
-		"an unknown person":   {[]string{"ticket", "create", "--as", "someone@example.com", "--project", "sandbox", "--title", "t"}, 2},
-		"a runner's account":  {[]string{"ticket", "create", "--as", "dev-sandbox@your-project-id.iam.gserviceaccount.com", "--project", "sandbox", "--title", "t"}, 2},
-		"no title":            {[]string{"ticket", "create", "--as", operator, "--project", "sandbox"}, 2},
-		"no project":          {[]string{"ticket", "create", "--as", operator, "--title", "t"}, 2},
-		"criteria not JSON":   {append(append([]string{}, base...), "--criteria", "it echoes"), 2},
-		"a criterion's field": {append(append([]string{}, base...), "--criteria", `[{"id": "AC1", "text": "x", "done": true}]`), 2},
-		"an unknown flag":     {append(append([]string{}, base...), "--state", "ready"), 2},
-		"a stray argument":    {append(append([]string{}, base...), "extra"), 2},
-		"an unknown project":  {[]string{"ticket", "create", "--as", operator, "--project", "nowhere", "--title", "t"}, 1},
-		"a criterion no text": {append(append([]string{}, base...), "--criteria", `[{"id": "AC1"}]`), 1},
-	} {
-		var out, errs bytes.Buffer
-		if code := run(ctx, c.args, &out, &errs); code != c.code {
-			t.Errorf("%s: exit %d, want %d\n%s", name, code, c.code, errs.String())
-		}
-	}
-	var n int
-	if err := conn.QueryRow(`SELECT count(*) FROM tickets WHERE project_id = 'sandbox'`).Scan(&n); err != nil || n != 0 {
-		t.Fatalf("%d sandbox tickets (%v), want none", n, err)
-	}
+// newRequestID is a random (version 4) UUID, the form the API takes as an idempotency key.
+func newRequestID() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	h := hex.EncodeToString(b)
+	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
 }
 
 func TestDispatchNeedsADatabase(t *testing.T) {
@@ -410,10 +548,13 @@ func TestDispatchNeedsADatabase(t *testing.T) {
 func TestUsageNamesDispatch(t *testing.T) {
 	var out, errs bytes.Buffer
 	run(context.Background(), nil, &out, &errs)
-	for _, c := range []string{"dispatch", "ticket create"} {
+	for _, c := range []string{"dispatch", "viewer"} {
 		if !strings.Contains(errs.String(), c) {
 			t.Fatalf("usage does not name %s:\n%s", c, errs.String())
 		}
+	}
+	if strings.Contains(errs.String(), "ticket") {
+		t.Fatalf("usage names the retired ticket create:\n%s", errs.String())
 	}
 }
 
@@ -475,5 +616,168 @@ func TestDBRights(t *testing.T) {
 		if _, ok := r[k]; !ok {
 			t.Errorf("the report lacks %q: %s", k, out.String())
 		}
+	}
+}
+
+const (
+	viewerOrigin      = "https://viewer-123456789012.us-central1.run.app"
+	viewerIAPAudience = "/projects/123456789012/locations/us-central1/services/viewer"
+)
+
+// viewerSecret names a secret's latest version in the fake Secret Manager.
+func viewerSecret(short string) string {
+	return "projects/" + cloudruntest.ProjectNumber + "/secrets/" + short + "/versions/latest"
+}
+
+// viewerEnv configures `foreman viewer` as it is deployed: its own database user, the metadata
+// server and Secret Manager (the CSRF key and the read-only App's id and key), IAP's keys and
+// audience, the callback API, its own origins and the bucket. It returns the database's owner, to
+// seed, the fake GCP, and IAP's key, to sign assertions.
+func viewerEnv(t *testing.T) (*sql.DB, *cloudruntest.GCP, *ecdsa.PrivateKey) {
+	t.Helper()
+	owner, url := testdb.NewViewerURL(t)
+	gcp := cloudruntest.NewGCP(t)
+	gcp.SetSecret("viewer-csrf-key", []byte("a csrf key of thirty-two bytes!!"))
+	gcp.SetSecret("viewer-github-app-id", []byte("67890"))
+	gcp.SetSecret("viewer-github-app-key", cloudruntest.AppKey(t))
+	iap, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k, v := range map[string]string{
+		"DATABASE_URL":                  url,
+		"FOREMAN_ADDR":                  "127.0.0.1:0",
+		"FOREMAN_IAP_AUDIENCE":          viewerIAPAudience,
+		"FOREMAN_IAP_JWKS_URL":          keyServer(t, jose.JSONWebKey{Key: &iap.PublicKey, KeyID: "i", Algorithm: "ES256", Use: "sig"}),
+		"FOREMAN_CALLBACK_URL":          callbackURL,
+		"FOREMAN_ORIGINS":               viewerOrigin + ",https://viewer-abcdefghij-uc.a.run.app",
+		"FOREMAN_ARTIFACTS_BUCKET":      "your-project-id-artifacts",
+		"FOREMAN_CSRF_KEY_SECRET":       viewerSecret("viewer-csrf-key"),
+		"FOREMAN_GITHUB_APP_ID_SECRET":  viewerSecret("viewer-github-app-id"),
+		"FOREMAN_GITHUB_APP_KEY_SECRET": viewerSecret("viewer-github-app-key"),
+		"GCE_METADATA_HOST":             gcp.MetadataHost(),
+		"FOREMAN_SECRETMANAGER_API":     gcp.URL(),
+	} {
+		t.Setenv(k, v)
+	}
+	return owner, gcp, iap
+}
+
+// `foreman viewer`, as deployed: it checks its database user's rights and logs them before it
+// listens (P06 D7), and serves the pages to a person IAP vouches for, and nothing to anyone else.
+func TestViewerServes(t *testing.T) {
+	owner, _, iap := viewerEnv(t)
+	if _, err := owner.Exec(`INSERT INTO tickets (project_id, title, state) VALUES ('sandbox', 'seen through the viewer', 'draft')`); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errs := &lockedBuffer{}
+	done := make(chan int, 1)
+	go func() {
+		var out bytes.Buffer
+		done <- run(ctx, []string{"viewer"}, &out, errs)
+	}()
+	var addr string
+	rights, listening := -1, -1
+	for deadline := time.Now().Add(10 * time.Second); addr == ""; time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the viewer never listened:\n%s", errs.String())
+		}
+		for i, l := range strings.Split(errs.String(), "\n") {
+			var line struct {
+				Msg, Addr, User string
+				Reads, Writes   []string
+			}
+			if json.Unmarshal([]byte(l), &line) != nil {
+				continue
+			}
+			switch line.Msg {
+			case "viewer database rights":
+				if line.User == "viewer" && len(line.Reads) == 5 && len(line.Writes) == 0 {
+					rights = i
+				}
+			case "viewer listening":
+				addr, listening = line.Addr, i
+			}
+		}
+	}
+	if rights < 0 || rights > listening {
+		t.Fatalf("no rights check logged before listening:\n%s", errs.String())
+	}
+	now := time.Now()
+	assertion := signJWT(t, jose.ES256, iap, "i", map[string]any{
+		"iss": "https://cloud.google.com/iap", "aud": viewerIAPAudience, "azp": viewerIAPAudience, "sub": "accounts.google.com:1",
+		"email": operator, "iat": now.Unix(), "exp": now.Add(10 * time.Minute).Unix(),
+	})
+	get := func(path, assertion string) (int, string) {
+		req, err := http.NewRequest(http.MethodGet, "http://"+addr+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if assertion != "" {
+			req.Header.Set("X-Goog-Iap-Jwt-Assertion", assertion)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(b)
+	}
+	if st, body := get("/", assertion); st != http.StatusOK || !strings.Contains(body, "seen through the viewer") {
+		t.Fatalf("the list: status %d:\n%s", st, body)
+	}
+	if st, body := get("/new", assertion); st != http.StatusOK || !strings.Contains(body, `name="csrf"`) {
+		t.Fatalf("the new-ticket form: status %d:\n%s", st, body)
+	}
+	if st, _ := get("/", ""); st != http.StatusUnauthorized {
+		t.Fatalf("without an assertion: status %d", st)
+	}
+	cancel()
+	if code := <-done; code != 0 {
+		t.Fatalf("exit %d\n%s", code, errs.String())
+	}
+}
+
+// `foreman viewer` refuses to start, naming why, when its configuration is missing or wrong, or
+// when its database user could write (P06 D7).
+func TestViewerRefusesToStart(t *testing.T) {
+	ownerURL, _ := migrated(t)
+	_, gcp, _ := viewerEnv(t)
+	gcp.SetSecret("short", []byte("too short"))
+	for name, c := range map[string]struct {
+		env  map[string]string
+		want string
+	}{
+		"no database":             {map[string]string{"DATABASE_URL": ""}, "DATABASE_URL"},
+		"no IAP audience":         {map[string]string{"FOREMAN_IAP_AUDIENCE": ""}, "FOREMAN_IAP_AUDIENCE"},
+		"no callback API":         {map[string]string{"FOREMAN_CALLBACK_URL": ""}, "FOREMAN_CALLBACK_URL"},
+		"an http callback API":    {map[string]string{"FOREMAN_CALLBACK_URL": "http://callback.example"}, "not an https URL"},
+		"no origins":              {map[string]string{"FOREMAN_ORIGINS": ""}, "FOREMAN_ORIGINS"},
+		"an http origin":          {map[string]string{"FOREMAN_ORIGINS": viewerOrigin + ",http://viewer.example"}, "FOREMAN_ORIGINS"},
+		"an origin with a path":   {map[string]string{"FOREMAN_ORIGINS": viewerOrigin + "/"}, "FOREMAN_ORIGINS"},
+		"no bucket":               {map[string]string{"FOREMAN_ARTIFACTS_BUCKET": ""}, "FOREMAN_ARTIFACTS_BUCKET"},
+		"not a secret version":    {map[string]string{"FOREMAN_CSRF_KEY_SECRET": "viewer-csrf-key"}, "FOREMAN_CSRF_KEY_SECRET"},
+		"no App key":              {map[string]string{"FOREMAN_GITHUB_APP_KEY_SECRET": ""}, "FOREMAN_GITHUB_APP_KEY_SECRET"},
+		"a short CSRF key":        {map[string]string{"FOREMAN_CSRF_KEY_SECRET": viewerSecret("short")}, "CSRF key"},
+		"an unreadable CSRF key":  {map[string]string{"FOREMAN_CSRF_KEY_SECRET": viewerSecret("absent")}, "CSRF key"},
+		"a user that can write":   {map[string]string{"DATABASE_URL": ownerURL}, "can write"},
+		"a metadata host w/ path": {map[string]string{"GCE_METADATA_HOST": "metadata.example/x"}, "metadata"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			for k, v := range c.env {
+				t.Setenv(k, v)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			var out bytes.Buffer
+			errs := &lockedBuffer{}
+			if code := run(ctx, []string{"viewer"}, &out, errs); code != 2 || !strings.Contains(errs.String(), c.want) ||
+				strings.Contains(errs.String(), "viewer listening") {
+				t.Fatalf("exit %d, want 2 naming %s:\n%s", code, c.want, errs.String())
+			}
+		})
 	}
 }

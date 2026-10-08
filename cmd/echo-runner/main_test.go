@@ -39,6 +39,7 @@ func TestAFailedRunExits1(t *testing.T) {
 		"FOREMAN_TOKEN_VERSION":     "1",
 		"GCE_METADATA_HOST":         host,
 		"FOREMAN_SECRETMANAGER_API": closed.URL,
+		"FOREMAN_ARTIFACTS_BUCKET":  "your-project-id-artifacts",
 	}
 	var errs bytes.Buffer
 	if code := run(context.Background(), func(k string) string { return env[k] }, &errs); code != 1 {

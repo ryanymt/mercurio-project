@@ -1,0 +1,15 @@
+{{template "head" "diff"}}
+<h1><a href="/tickets/{{.T.ID}}">#{{.T.ID}}</a> {{.T.Title}}: the diff</h1>
+{{with .Note}}<p class="note">{{.}}</p>{{end}}
+{{with .D}}<p class="range">base <span class="sha">{{.Base}}</span>, head <span class="sha">{{.Head}}</span>: <span class="sha">{{.Base}}...{{.Head}}</span></p>
+{{if eq .Status "not-found"}}<p class="bad">commit not found: GitHub does not know this range, so no commit-bound action is offered.</p>
+{{else if eq .Status "too-large"}}<p class="note">This diff is too large for GitHub to give in one piece.</p>
+{{with .Files}}<h2>Changed files{{if eq (len .) 300}} (the first 300){{end}}</h2>
+<ul class="files">{{range .}}<li class="sha">{{.}}</li>{{end}}</ul>{{else}}<p>GitHub could not list the changed files either.</p>{{end}}
+{{end}}
+<p><a href="{{.CompareURL}}">GitHub's compare page</a></p>
+{{end}}
+{{with .Lines}}<pre class="udiff">{{range .}}<span class="{{.Class}}">{{.Text}}</span>
+{{end}}</pre>{{end}}
+<p class="who">signed in as {{.Person}}</p>
+{{template "foot"}}

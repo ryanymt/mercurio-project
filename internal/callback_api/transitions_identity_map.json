@@ -10,5 +10,6 @@
   {"email": "spec-sandbox@your-project-id.iam.gserviceaccount.com", "role": "spec", "project": "sandbox"},
   {"email": "architect-sandbox@your-project-id.iam.gserviceaccount.com", "role": "architect", "project": "sandbox"},
   {"email": "integrator-sandbox@your-project-id.iam.gserviceaccount.com", "role": "integrator", "project": "sandbox"},
+  {"email": "viewer@your-project-id.iam.gserviceaccount.com", "role": "viewer"},
   {"email": "operator@example.com", "role": "human"}
 ]

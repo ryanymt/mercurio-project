@@ -1,7 +1,9 @@
 // Command echo-runner is P05's runner (internal/runner): started by the dispatcher as a Cloud Run
-// job execution, it takes one claimed dev ticket to review with an echo commit and no model. Its
+// job execution, it takes one claimed dev ticket to review with an echo commit and no model, or to
+// escalated when the ticket's title asks, storing its transcript in the artifacts bucket (P06). Its
 // configuration is its environment (runner.FromEnv); it logs JSON to standard error and exits 0
-// when the commit was submitted, 1 when the run stopped, and 2 when it could not start.
+// when the commit was submitted or escalated, 1 when the run stopped, and 2 when it could not
+// start.
 package main
 
 import (

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	callbackapi "github.com/ryanymt/mercurio-project/internal/callback_api"
 	"github.com/ryanymt/mercurio-project/internal/dispatcher"
@@ -413,7 +414,7 @@ func TestTheLaunchRequest(t *testing.T) {
 		TicketID: work, Project: "foreman", RepoURL: "https://example.invalid/foreman.git",
 		Role: callbackapi.RoleDev, ServiceAccount: "dev-foreman@your-project-id.iam.gserviceaccount.com",
 		Branch: "foreman/" + itoa(work) + "/1", BaseSHA: baseSHA, ClaimToken: token, Attempt: 1,
-		Provider: "zai", Model: "glm-5.3-flash", Tier: "dev-glm-flash", Credential: "zai-api-key",
+		Provider: "zai", Model: "glm-5.3-flash", Tier: "dev-glm-flash", Credential: "zai-api-key", Title: "fixture",
 	}
 	if reqs[0] != want {
 		t.Fatalf("launch request\n%+v\nwant\n%+v", reqs[0], want)
@@ -430,6 +431,39 @@ func TestTheLaunchRequest(t *testing.T) {
 		r.HeadSHA == "" || r.ServiceAccount != "integrator-foreman@your-project-id.iam.gserviceaccount.com" {
 		t.Fatalf("integrator launch %+v", r)
 	}
+}
+
+// The launch request carries the ticket's title, the echo runner's instruction (P06 D14), cut to
+// dispatcher.MaxTitle characters: it travels in the execution's environment, and the API sets no
+// limit. A title at the bound is whole; one past it is cut at a character, never inside one.
+func TestTheLaunchRequestCarriesTheTitleBounded(t *testing.T) {
+	for name, c := range map[string]struct{ title, want string }{
+		"short":        {"[echo:escalate] stop here", "[echo:escalate] stop here"},
+		"at the bound": {strings.Repeat("é", dispatcher.MaxTitle), strings.Repeat("é", dispatcher.MaxTitle)},
+		"past it":      {strings.Repeat("é", dispatcher.MaxTitle) + "überlang", strings.Repeat("é", dispatcher.MaxTitle)},
+		"far past it":  {strings.Repeat("x", 10*dispatcher.MaxTitle), strings.Repeat("x", dispatcher.MaxTitle)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t)
+			id := e.seed(fixture{state: sReady})
+			e.exec(`UPDATE tickets SET title = $1 WHERE id = $2`, c.title, id)
+			e.tick()
+			reqs := e.launcher.launched()
+			if len(reqs) != 1 || reqs[0].Title != c.want || !utf8.ValidString(reqs[0].Title) {
+				t.Fatalf("launched %d with title %q, want %q", len(reqs), firstTitle(reqs), c.want)
+			}
+		})
+	}
+	if dispatcher.MaxTitle < 100 || dispatcher.MaxTitle > 1000 {
+		t.Fatalf("MaxTitle %d: a title must fit, and an environment override stay small", dispatcher.MaxTitle)
+	}
+}
+
+func firstTitle(reqs []dispatcher.LaunchRequest) string {
+	if len(reqs) == 0 {
+		return ""
+	}
+	return reqs[0].Title
 }
 
 // Three failed launches in a row escalate: for new work, and for QA, whose next ticket is then

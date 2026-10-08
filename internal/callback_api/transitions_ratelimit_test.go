@@ -200,7 +200,7 @@ func TestHTTPRateLimit(t *testing.T) {
 	if b["provider"] != "anthropic" || b["paused_until"] == nil {
 		t.Fatalf("response %v", b)
 	}
-	st, b = a.do(call{method: "POST", path: path, token: a.tokenFor(humanCaller.Email), key: newRequestID(),
+	st, b = a.do(call{method: "POST", path: path, as: humanCaller.Email, key: newRequestID(),
 		body: map[string]any{"reset_at": reset}})
 	wantHTTP(t, st, 403, b)
 }

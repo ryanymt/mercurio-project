@@ -53,7 +53,7 @@ type Client struct {
 }
 
 // New returns a client for the API at api (DefaultAPI when empty); a nil httpClient gets one with
-// a 30-second timeout, well inside a claim's five-minute lease.
+// a 30-second timeout, well inside the ten minutes a claim gives its runner's first call.
 func New(creds Credentials, api string, httpClient *http.Client) *Client {
 	if api == "" {
 		api = DefaultAPI

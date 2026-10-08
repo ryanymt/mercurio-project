@@ -5,15 +5,22 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
 // Artifacts (docs/state-machine.md, "Artifacts and the lease"; P02 D20): only the runner holding
-// the lease registers one, with its claim token, for the ticket's current attempt, under
-// `{project}/{ticket}/{attempt}/`. Registration adds a row to `artifacts` and does not change the
-// ticket, so it writes no ticket event.
+// the lease registers one, with its claim token, for the ticket's current attempt, at
+// `{project}/{ticket}/{attempt}/{role}-{run}/{kind}`: its own role, a run id of 32 lowercase hex
+// characters, and the kind it registers. The viewer labels a run by that segment, so a runner
+// cannot pass its output off as another role's, and a QA report comes from QA alone (P06 R4#2).
+// Registration adds a row to `artifacts` and does not change the ticket, so it writes no ticket
+// event.
 
 var artifactKinds = map[string]bool{"transcript": true, "diff": true, "test_report": true, "qa_report": true, "log": true}
+
+// runSegment is what follows the attempt's prefix: {role}-{run}/{kind}.
+var runSegment = regexp.MustCompile(`^([a-z_]+)-([0-9a-f]{32})/([a-z_]+)$`)
 
 // ArtifactRequest registers one artifact's storage path.
 type ArtifactRequest struct {
@@ -50,9 +57,9 @@ func cleanPath(p string) bool {
 }
 
 // RegisterArtifact records an artifact. Order as elsewhere: validation (400), a lease-holding
-// role in its own project (403), the request log, the lock, the lease owner, the fence and the
-// lease's expiry (409), then the path's prefix against the ticket's project, id and current
-// attempt (400).
+// role in its own project, and QA alone for a QA report (403), the request log, the lock, the lease
+// owner, the fence and the lease's expiry (409), then the path against the ticket's project, id
+// and current attempt, the caller's role and the kind (400).
 func (e *Engine) RegisterArtifact(ctx context.Context, tx *sql.Tx, req ArtifactRequest) (ArtifactResult, error) {
 	if err := requireReadCommitted(ctx, tx); err != nil {
 		return ArtifactResult{}, err
@@ -73,6 +80,9 @@ func (e *Engine) RegisterArtifact(ctx context.Context, tx *sql.Tx, req ArtifactR
 	case RoleDev, RoleQA, RoleIntegrator:
 	default:
 		return ArtifactResult{}, refuse(403, "%s never holds a lease, so it registers no artifacts", req.Caller.Role)
+	}
+	if req.Kind == "qa_report" && req.Caller.Role != RoleQA {
+		return ArtifactResult{}, refuse(403, "a QA report comes from QA alone")
 	}
 	if err := checkProject(ctx, tx, req.TicketID, req.Caller.Project); err != nil {
 		return ArtifactResult{}, err
@@ -109,6 +119,11 @@ func (e *Engine) RegisterArtifact(ctx context.Context, tx *sql.Tx, req ArtifactR
 	prefix := fmt.Sprintf("%s/%d/%d/", t.Project, t.ID, t.Attempts)
 	if !strings.HasPrefix(req.GCSPath, prefix) {
 		return ArtifactResult{}, refuse(400, "artifacts of this attempt go under %s", prefix)
+	}
+	m := runSegment.FindStringSubmatch(strings.TrimPrefix(req.GCSPath, prefix))
+	if m == nil || m[1] != string(req.Caller.Role) || m[3] != req.Kind {
+		return ArtifactResult{}, refuse(400, "a %s registers its %s as %s%s-<run>/%s, the run 32 lowercase hex characters",
+			req.Caller.Role, req.Kind, prefix, req.Caller.Role, req.Kind)
 	}
 
 	var id int64

@@ -1,0 +1,11 @@
+{{define "actions"}}{{with .Actions}}{{if or .Forms .Notes}}<section class="actions">
+<h2>Decide</h2>
+{{range .Notes}}<p class="note">{{.}}</p>
+{{end}}{{range .Forms}}<form class="act" method="post" action="{{.Action}}">
+{{range .Fields}}<input type="hidden" name="{{.Name}}" value="{{.Value}}">
+{{end}}{{if .Park}}<label>reason <input type="text" name="reason" value="" required maxlength="500"></label>
+<label>until (optional) <input type="date" name="until" value=""></label>
+{{else if .Reason}}<label>reason (optional) <input type="text" name="reason" value="" maxlength="500"></label>
+{{end}}<button type="submit"{{if .Risky}} class="risky"{{end}}>{{.Label}}</button>
+</form>
+{{end}}</section>{{end}}{{end}}{{end}}

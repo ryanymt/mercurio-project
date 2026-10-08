@@ -114,6 +114,9 @@ func TestMetaListCoversTheRealPaths(t *testing.T) {
 		"rollback.sh", "scripts/rollback.sh", "model-policy.yml", "config/model-policy.yml",
 		".gitattributes", "sub/.gitattributes", ".claude/settings.json", ".claude/commands/plan.md", ".mcp.json",
 		"internal/escalation/x.go", "web/parking_view.go",
+		// P06: the viewer, the capture package with its scrubber, and the runner (red team R9, R1#2).
+		"internal/viewer/viewer.go", "internal/viewer/testdata/claude/session.jsonl", "internal/capture/scrub.go",
+		"internal/runner/runner.go",
 	} {
 		if !matchesAny(metaProtectedPaths(), path) {
 			t.Errorf("%s is not protected by the compiled-in meta list", path)

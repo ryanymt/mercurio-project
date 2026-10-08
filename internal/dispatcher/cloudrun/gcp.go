@@ -27,7 +27,7 @@ const (
 	DefaultRun           = "https://run.googleapis.com"
 )
 
-// callTimeout bounds each call, well inside a claim's five-minute lease.
+// callTimeout bounds each call, well inside the ten minutes a claim gives its runner's first call.
 const callTimeout = 30 * time.Second
 
 // Endpoints are where the calls go; empty means the default. Anything but the metadata server is

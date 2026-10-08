@@ -1,0 +1,6 @@
+{{template "head" .Title}}
+<h1>{{.Title}}</h1>
+<p>{{.Message}}</p>
+{{with .Detail}}<p class="detail">{{.}}</p>{{end}}
+{{with .Back}}<p><a href="{{.}}">back</a></p>{{end}}
+{{template "foot"}}

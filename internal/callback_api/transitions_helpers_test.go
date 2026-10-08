@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"reflect"
 	"testing"
+	"time"
 
 	callbackapi "github.com/ryanymt/mercurio-project/internal/callback_api"
 	"github.com/ryanymt/mercurio-project/internal/testdb"
@@ -81,6 +82,10 @@ func pastSubmission(s callbackapi.State) bool {
 	return false
 }
 
+// fixtureEscalatedAt is when every seeded escalation happened: microseconds, as Postgres keeps them,
+// and nothing finer. A person's decision out of escalated names it (P06 D19).
+var fixtureEscalatedAt = time.Date(2026, 10, 1, 12, 0, 0, 123456000, time.UTC)
+
 func seed(t *testing.T, conn *sql.DB, f fixture) int64 {
 	t.Helper()
 	if f.project == "" {
@@ -122,10 +127,10 @@ func seed(t *testing.T, conn *sql.DB, f fixture) int64 {
 		VALUES ($1, 'fixture', $2, $3, $4, $5, $6, $7,
 		  CASE WHEN $8 THEN now() END, CASE WHEN $8 THEN now() + interval '5 minutes' END,
 		  $9, CASE WHEN $9 THEN 'parked by fixture' END, $10::jsonb,
-		  CASE WHEN $11 THEN now() END, $12, $13)
+		  CASE WHEN $11 THEN $14::timestamptz END, $12, $13)
 		RETURNING id`,
 		f.project, string(f.state), f.attempts, parent, depth, token, claimedBy, leased, f.parked, ac,
-		f.state == callbackapi.StateEscalated, base, head,
+		f.state == callbackapi.StateEscalated, base, head, fixtureEscalatedAt,
 	).Scan(&id)
 	if err != nil {
 		t.Fatalf("seed %+v: %v", f, err)
@@ -192,6 +197,15 @@ func request(id int64, from, to callbackapi.State, c callbackapi.Caller, ch call
 	if carriesCommit(from, to) {
 		req.HeadSHA = fixtureSHA
 	}
+	// A person's decision out of escalated names the escalation the page showed, and an approval or
+	// a return to QA the commit (P06 D19, D5).
+	if from == callbackapi.StateEscalated {
+		at := fixtureEscalatedAt
+		req.EscalatedAt = &at
+		if bindsCommit(to) {
+			req.HeadSHA = fixtureSHA
+		}
+	}
 	// The dispatcher's new-work claim names the branch and base (a ticket's first attempt unless the
 	// test sets another), and its returns their kind: a reap unless the test says otherwise (P04).
 	if c.Role == callbackapi.RoleDispatcher && from == callbackapi.StateReady && to == callbackapi.StateClaimed {
@@ -201,6 +215,11 @@ func request(id int64, from, to callbackapi.State, c callbackapi.Caller, ch call
 		req.Return = callbackapi.ReturnLeaseExpired
 	}
 	return req
+}
+
+// bindsCommit: a person's approval, or return to QA, names the commit the page showed (P06 D5).
+func bindsCommit(to callbackapi.State) bool {
+	return to == callbackapi.StateApproved || to == callbackapi.StateAwaitingReview
 }
 
 // carriesCommit: the dev runner's submission and QA's approval name a commit (P03 D10).

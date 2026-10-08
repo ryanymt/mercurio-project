@@ -2,7 +2,6 @@ package callbackapi_test
 
 import (
 	"bytes"
-	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -16,7 +15,9 @@ import (
 )
 
 // The HTTP tests run the real handler, the real verifier and the real engine, with tokens signed
-// by a local key that an in-process key server publishes.
+// by a local key that an in-process key server publishes, and a person's IAP assertions signed by
+// another, published by a second key server standing in for IAP's. A person calls as the viewer
+// does: the viewer's own token, and the person's assertion relayed (P06 D4).
 
 const httpMap = `[
   {"email": "dispatcher@your-project-id.iam.gserviceaccount.com", "role": "dispatcher"},
@@ -25,15 +26,17 @@ const httpMap = `[
   {"email": "spec-foreman@your-project-id.iam.gserviceaccount.com", "role": "spec", "project": "foreman"},
   {"email": "architect-foreman@your-project-id.iam.gserviceaccount.com", "role": "architect", "project": "foreman"},
   {"email": "integrator-foreman@your-project-id.iam.gserviceaccount.com", "role": "integrator", "project": "foreman"},
+  {"email": "viewer@your-project-id.iam.gserviceaccount.com", "role": "viewer"},
   {"email": "operator@example.com", "role": "human"}
 ]`
 
 type api struct {
-	t    *testing.T
-	conn *sql.DB
-	srv  *httptest.Server
-	key  signer
-	eng  *callbackapi.Engine
+	t      *testing.T
+	conn   *sql.DB
+	srv    *httptest.Server
+	key    signer
+	iapKey iapSigner
+	eng    *callbackapi.Engine
 }
 
 func newAPI(t *testing.T) *api {
@@ -45,35 +48,35 @@ func newAPI(t *testing.T) *api {
 func newAPIWith(t *testing.T, e *callbackapi.Engine) *api {
 	t.Helper()
 	conn := fresh(t)
-	k := newSigner(t, "k1")
-	ks := newKeyServer(t, k)
-	ids, err := callbackapi.LoadIdentityMap([]byte(httpMap))
-	if err != nil {
-		t.Fatal(err)
-	}
-	v, err := callbackapi.NewVerifier(context.Background(), callbackapi.VerifierConfig{
-		JWKSURL: ks.URL, ServiceAudience: serviceAudience, HumanAudiences: []string{humanAudience},
-	}, ids)
-	if err != nil {
-		t.Fatal(err)
-	}
+	k, iap := newSigner(t, "k1"), newIAPSigner(t, "iap-1")
+	v := relayVerifier(t, newKeyServer(t, k), newKeyServerOf(t, iap.public()), nil)
 	srv := httptest.NewServer(callbackapi.NewServer(conn, e, v, nil).Handler())
 	t.Cleanup(srv.Close)
-	return &api{t: t, conn: conn, srv: srv, key: k, eng: e}
+	return &api{t: t, conn: conn, srv: srv, key: k, iapKey: iap, eng: e}
 }
 
-// tokenFor signs a token for an email with the audience its kind must carry.
+// tokenFor signs a service account's token for the service audience. A person's own token is never
+// accepted, so a person calls through the viewer (`as`).
 func (a *api) tokenFor(email string) string {
-	aud := humanAudience
-	if strings.HasSuffix(email, "gserviceaccount.com") {
-		aud = serviceAudience
+	if !strings.HasSuffix(email, "gserviceaccount.com") {
+		a.t.Fatalf("tokenFor(%s): a person calls as the viewer relaying them; use as", email)
 	}
-	return a.key.sign(a.t, claimsFor(email, aud))
+	return a.key.sign(a.t, claimsFor(email, serviceAudience))
 }
+
+// assertionFor signs a person's IAP assertion, from the spike's real claims.
+func (a *api) assertionFor(email string) string { return a.iapKey.sign(a.t, iapClaimsFor(a.t, email)) }
 
 type call struct {
 	method, path, token, key, claim string
 	body                            any
+	// as names the caller instead of token: a service account sends its own token, a person the
+	// viewer's token and their assertion.
+	as string
+	// assertion is sent in X-Foreman-IAP-Assertion; extraAssertion as a second value; emptyAssertion
+	// sends the header with no value.
+	assertion, extraAssertion string
+	emptyAssertion            bool
 }
 
 func (a *api) do(c call) (int, map[string]any) {
@@ -84,6 +87,21 @@ func (a *api) do(c call) (int, map[string]any) {
 		r = bytes.NewReader(b)
 	}
 	req, _ := http.NewRequest(c.method, a.srv.URL+c.path, r)
+	if c.as != "" {
+		if strings.HasSuffix(c.as, "gserviceaccount.com") {
+			c.token = a.tokenFor(c.as)
+		} else {
+			c.token, c.assertion = a.tokenFor(viewerEmail), a.assertionFor(c.as)
+		}
+	}
+	for _, v := range []string{c.assertion, c.extraAssertion} {
+		if v != "" {
+			req.Header.Add(callbackapi.RelayHeader, v)
+		}
+	}
+	if c.emptyAssertion {
+		req.Header[http.CanonicalHeaderKey(callbackapi.RelayHeader)] = []string{""}
+	}
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
@@ -113,8 +131,14 @@ func (a *api) transition(email string, id int64, from, to callbackapi.State) (in
 	if carriesCommit(from, to) {
 		body["head_sha"] = fixtureSHA
 	}
+	if from == sEscalated {
+		body["escalated_at"] = fixtureEscalatedAt
+		if bindsCommit(to) {
+			body["head_sha"] = fixtureSHA
+		}
+	}
 	return a.do(call{method: "POST", path: fmt.Sprintf("/v1/tickets/%d/transitions", id),
-		token: a.tokenFor(email), key: newRequestID(), claim: liveToken, body: body})
+		as: email, key: newRequestID(), claim: liveToken, body: body})
 }
 
 func wantHTTP(t *testing.T, got, want int, body map[string]any) {
@@ -137,11 +161,10 @@ func TestHTTPRequiresAValidToken(t *testing.T) {
 	wantHTTP(t, st, 401, b)
 }
 
-// viewer, callback-api, the default compute account and an unknown person hold valid tokens but
-// no mapping: refused on every caller-driven row, and nothing changes.
-// Valid tokens for identities the map does not name.
+// callback-api and the default compute account hold valid tokens, and an unknown person a valid
+// relayed assertion, but none is mapped: refused on every caller-driven row, and nothing changes.
+// (The viewer is mapped, and is nobody without a person to relay: transitions_relay_test.go.)
 var unmapped = []string{
-	"viewer@your-project-id.iam.gserviceaccount.com",
 	"callback-api@your-project-id.iam.gserviceaccount.com",
 	defaultCompute,
 	"someone@example.com",
@@ -182,8 +205,8 @@ func TestHTTPChunkTwoNamedCases(t *testing.T) {
 	wantHTTP(t, st, 403, b)
 
 	st, b = a.do(call{method: "PUT", path: fmt.Sprintf("/v1/tickets/%d/parking", esc),
-		token: a.tokenFor(dispatcherCaller.Email), key: newRequestID(),
-		body: map[string]any{"parked": true, "reason": "the dispatcher tries"}})
+		as: dispatcherCaller.Email, key: newRequestID(),
+		body: map[string]any{"parked": true, "reason": "the dispatcher tries", "escalated_at": fixtureEscalatedAt}})
 	wantHTTP(t, st, 403, b)
 	assertUnchanged(t, a.conn, esc, before, 0, 0)
 
@@ -296,7 +319,7 @@ func TestHTTPIdempotencyKeyRequired(t *testing.T) {
 func TestHTTPUnknownFieldsRefused(t *testing.T) {
 	a := newAPI(t)
 	for _, field := range []string{"state", "parent_ticket_id", "depth", "attempt_count", "parked"} {
-		st, b := a.do(call{method: "POST", path: "/v1/tickets", token: a.tokenFor(humanCaller.Email), key: newRequestID(),
+		st, b := a.do(call{method: "POST", path: "/v1/tickets", as: humanCaller.Email, key: newRequestID(),
 			body: map[string]any{"project": "foreman", "title": "sneaky", field: 1}})
 		if st != 400 {
 			t.Errorf("creation with %q: %d, want 400 (%v)", field, st, b)
@@ -337,17 +360,17 @@ func TestHTTPHeartbeat(t *testing.T) {
 	}
 	st, b = a.do(call{method: "POST", path: path, token: a.tokenFor(qa.Email), key: newRequestID(), claim: liveToken})
 	wantHTTP(t, st, 409, b) // QA does not own in_progress's lease
-	st, b = a.do(call{method: "POST", path: path, token: a.tokenFor(humanCaller.Email), key: newRequestID()})
-	wantHTTP(t, st, 403, b)
+	st, b = a.do(call{method: "POST", path: path, as: humanCaller.Email, key: newRequestID()})
+	wantHTTP(t, st, 403, b) // a relayed person never heartbeats
 }
 
 func TestHTTPArtifacts(t *testing.T) {
 	a := newAPI(t)
 	id := seed(t, a.conn, fixture{state: sInProgress, attempts: 1})
 	path := fmt.Sprintf("/v1/tickets/%d/artifacts", id)
-	good := fmt.Sprintf("foreman/%d/1/transcript.jsonl", id)
+	good := runPath("foreman", id, 1, callbackapi.RoleDev, "transcript")
 	register := func(email, claim, kind, gcs string) (int, map[string]any) {
-		return a.do(call{method: "POST", path: path, token: a.tokenFor(email), key: newRequestID(), claim: claim,
+		return a.do(call{method: "POST", path: path, as: email, key: newRequestID(), claim: claim,
 			body: map[string]any{"kind": kind, "gcs_path": gcs}})
 	}
 	st, b := register(dev.Email, liveToken, "transcript", good)
@@ -361,17 +384,17 @@ func TestHTTPArtifacts(t *testing.T) {
 		email, claim, kind, gcs string
 		status                  int
 	}{
-		"another attempt":    {dev.Email, liveToken, "transcript", fmt.Sprintf("foreman/%d/2/t.jsonl", id), 400},
-		"another project":    {dev.Email, liveToken, "transcript", fmt.Sprintf("other/%d/1/t.jsonl", id), 400},
-		"another ticket":     {dev.Email, liveToken, "transcript", fmt.Sprintf("foreman/%d/1/t.jsonl", id+1), 400},
-		"traversal":          {dev.Email, liveToken, "log", fmt.Sprintf("foreman/%d/1/../2/x", id), 400},
-		"leading slash":      {dev.Email, liveToken, "log", fmt.Sprintf("/foreman/%d/1/x", id), 400},
-		"empty segment":      {dev.Email, liveToken, "log", fmt.Sprintf("foreman/%d/1//x", id), 400},
-		"no file":            {dev.Email, liveToken, "log", fmt.Sprintf("foreman/%d/1/", id), 400},
+		"another attempt":    {dev.Email, liveToken, "transcript", runPath("foreman", id, 2, callbackapi.RoleDev, "transcript"), 400},
+		"another project":    {dev.Email, liveToken, "transcript", runPath("other", id, 1, callbackapi.RoleDev, "transcript"), 400},
+		"another ticket":     {dev.Email, liveToken, "transcript", runPath("foreman", id+1, 1, callbackapi.RoleDev, "transcript"), 400},
+		"traversal":          {dev.Email, liveToken, "log", fmt.Sprintf("foreman/%d/1/../2/dev-%s/log", id, testRun), 400},
+		"leading slash":      {dev.Email, liveToken, "log", "/" + runPath("foreman", id, 1, callbackapi.RoleDev, "log"), 400},
+		"empty segment":      {dev.Email, liveToken, "log", fmt.Sprintf("foreman/%d/1//dev-%s/log", id, testRun), 400},
+		"trailing slash":     {dev.Email, liveToken, "log", runPath("foreman", id, 1, callbackapi.RoleDev, "log") + "/", 400},
 		"unknown kind":       {dev.Email, liveToken, "secrets", good, 400},
-		"no token":           {dev.Email, "", "log", good, 409},
-		"stale token":        {dev.Email, "claim-token-of-a-reaped-run", "log", good, 409},
-		"not the lease role": {qa.Email, liveToken, "log", good, 409},
+		"no token":           {dev.Email, "", "transcript", good, 409},
+		"stale token":        {dev.Email, "claim-token-of-a-reaped-run", "transcript", good, 409},
+		"not the lease role": {qa.Email, liveToken, "transcript", runPath("foreman", id, 1, callbackapi.RoleQA, "transcript"), 409},
 		"a human":            {humanCaller.Email, "", "log", good, 403},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -384,7 +407,7 @@ func TestHTTPArtifacts(t *testing.T) {
 		other := seed(t, a.conn, fixture{project: "other", state: sInProgress, attempts: 1})
 		st, b := a.do(call{method: "POST", path: fmt.Sprintf("/v1/tickets/%d/artifacts", other),
 			token: a.tokenFor(dev.Email), key: newRequestID(), claim: liveToken,
-			body: map[string]any{"kind": "log", "gcs_path": fmt.Sprintf("other/%d/1/x", other)}})
+			body: map[string]any{"kind": "log", "gcs_path": runPath("other", other, 1, callbackapi.RoleDev, "log")}})
 		wantHTTP(t, st, 403, b)
 	})
 	if n := count(t, a.conn, `SELECT count(*) FROM artifacts`); n != 1 {
@@ -396,7 +419,7 @@ func TestHTTPArtifacts(t *testing.T) {
 
 func TestHTTPCreateDecomposeParkPromote(t *testing.T) {
 	a := newAPI(t)
-	st, b := a.do(call{method: "POST", path: "/v1/tickets", token: a.tokenFor(humanCaller.Email), key: newRequestID(),
+	st, b := a.do(call{method: "POST", path: "/v1/tickets", as: humanCaller.Email, key: newRequestID(),
 		body: map[string]any{"project": "foreman", "title": "a parent", "acceptance_criteria": oneAC}})
 	wantHTTP(t, st, 201, b)
 	parent := int64(b["ticket_id"].(float64))
@@ -412,8 +435,9 @@ func TestHTTPCreateDecomposeParkPromote(t *testing.T) {
 		t.Fatalf("six children: %v, want the escalated parent", b)
 	}
 
-	st, b = a.do(call{method: "PUT", path: fmt.Sprintf("/v1/tickets/%d/parking", parent), token: a.tokenFor(humanCaller.Email),
-		key: newRequestID(), body: map[string]any{"parked": true, "reason": "discussing the split"}})
+	st, b = a.do(call{method: "PUT", path: fmt.Sprintf("/v1/tickets/%d/parking", parent), as: humanCaller.Email,
+		key: newRequestID(), body: map[string]any{"parked": true, "reason": "discussing the split",
+			"escalated_at": escalatedAtOf(t, a.conn, parent)}})
 	wantHTTP(t, st, 200, b)
 
 	for _, role := range agentRoles {
@@ -424,12 +448,12 @@ func TestHTTPCreateDecomposeParkPromote(t *testing.T) {
 			t.Errorf("%s promoting: %d, want 403", role, st)
 		}
 	}
-	st, b = a.do(call{method: "POST", path: "/v1/promotions", token: a.tokenFor(humanCaller.Email), key: newRequestID(),
+	// Nor a person: the relay reaches only creation, transitions and parking (P06 D20), so promotions
+	// have no HTTP path until P09 decides how one is recorded ([P06/review2]). The engine's rule, a
+	// human alone promotes, is tested in transitions_promotions_test.go.
+	st, b = a.do(call{method: "POST", path: "/v1/promotions", as: humanCaller.Email, key: newRequestID(),
 		body: map[string]any{"component": "dispatcher", "image_digest": digest('a'), "git_sha": gitSHA('1')}})
-	wantHTTP(t, st, 201, b)
-	if b["promoted_by"] != humanCaller.Email {
-		t.Fatalf("promoted_by %v, want the verified email", b["promoted_by"])
-	}
+	wantHTTP(t, st, 403, b)
 }
 
 func TestHTTPHealthPingsTheDatabase(t *testing.T) {

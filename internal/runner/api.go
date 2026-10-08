@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+
+	"github.com/ryanymt/mercurio-project/internal/capture"
 )
 
 // api calls the callback API as the runner: its ID token, its ticket's claim token, and a fresh
@@ -22,12 +24,22 @@ type api struct {
 	claim    string
 }
 
-func (a *api) transition(ctx context.Context, from, to, headSHA string) error {
-	body := map[string]string{"from": from, "to": to}
+func (a *api) transition(ctx context.Context, from, to, headSHA string, payload map[string]any) error {
+	body := map[string]any{"from": from, "to": to}
 	if headSHA != "" {
 		body["head_sha"] = headSHA
 	}
+	if payload != nil {
+		body["payload"] = payload
+	}
 	return a.call(ctx, fmt.Sprintf("/v1/tickets/%d/transitions", a.ticket), body)
+}
+
+// Register registers a capture prefix on the ticket through the fenced artifacts endpoint: the api
+// is the capture's capture.Registrar.
+func (a *api) Register(ctx context.Context, kind capture.Kind, prefix string) error {
+	return a.call(ctx, fmt.Sprintf("/v1/tickets/%d/artifacts", a.ticket),
+		map[string]string{"kind": string(kind), "gcs_path": prefix})
 }
 
 func (a *api) heartbeat(ctx context.Context) error {

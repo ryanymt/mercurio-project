@@ -1,0 +1,14 @@
+{{template "head" "tickets"}}
+<h1>Tickets</h1>
+<form method="get" action="/" class="filters">
+<label>project <select name="project"><option value="">all</option>{{range .Projects}}<option value="{{.}}"{{if eq . $.Project}} selected{{end}}>{{.}}</option>{{end}}</select></label>
+<label>state <input name="state" value="{{.State}}" size="16"></label>
+<button type="submit">filter</button>
+</form>
+<table class="tickets">
+<tr><th>#</th><th>project</th><th>state</th><th>title</th><th>updated</th></tr>
+{{range .Tickets}}<tr class="state-{{.State}}"><td><a href="/tickets/{{.ID}}">{{.ID}}</a></td><td>{{.Project}}</td><td>{{.State}}{{if .Parked}} (parked){{end}}</td><td><a href="/tickets/{{.ID}}">{{.Title}}</a></td><td>{{ts .UpdatedAt}}</td></tr>
+{{else}}<tr><td colspan="5">no tickets</td></tr>
+{{end}}</table>
+<p class="who">signed in as {{.Person}}</p>
+{{template "foot"}}

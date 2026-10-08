@@ -70,24 +70,33 @@ func (g *google) idToken(ctx context.Context, audience string) (string, error) {
 	return tok, nil
 }
 
-// secret reads one version of a secret (projects/P/secrets/S/versions/N) as the job's account. A
-// numbered version reads consistently, where latest would not (D17).
-func (g *google) secret(ctx context.Context, version string) ([]byte, error) {
+// accessToken is the job's OAuth access token, for Secret Manager and Cloud Storage.
+func (g *google) accessToken(ctx context.Context) (string, error) {
 	b, err := g.fromMetadata(ctx, "token")
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	var t struct {
 		AccessToken string `json:"access_token"`
 	}
 	if err := json.Unmarshal(b, &t); err != nil || t.AccessToken == "" {
-		return nil, errors.New("the metadata server answered with no access token")
+		return "", errors.New("the metadata server answered with no access token")
+	}
+	return t.AccessToken, nil
+}
+
+// secret reads one version of a secret (projects/P/secrets/S/versions/N) as the job's account. A
+// numbered version reads consistently, where latest would not (D17).
+func (g *google) secret(ctx context.Context, version string) ([]byte, error) {
+	token, err := g.accessToken(ctx)
+	if err != nil {
+		return nil, err
 	}
 	req, err := http.NewRequestWithContext(ctx, "GET", g.secretManager+"/v1/"+version+":access", nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+t.AccessToken)
+	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := g.http.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("access %s: %w", version, err)

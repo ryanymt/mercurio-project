@@ -266,7 +266,7 @@ func doArtifact(t *testing.T, conn *sql.DB, id int64, c callbackapi.Caller, toke
 		t.Fatal(err)
 	}
 	_, err = newEngine(nil).RegisterArtifact(ctx, tx, callbackapi.ArtifactRequest{
-		TicketID: id, Caller: c, Kind: "log", GCSPath: fmt.Sprintf("foreman/%d/%d/run.log", id, cols(t, conn, id).Attempts),
+		TicketID: id, Caller: c, Kind: "log", GCSPath: runPath("foreman", id, cols(t, conn, id).Attempts, c.Role, "log"),
 		RequestID: newRequestID(), ClaimToken: token, Method: "POST", Path: fmt.Sprintf("/v1/tickets/%d/artifacts", id),
 	})
 	if err != nil {
@@ -540,7 +540,9 @@ func TestAHumansEventResetsTheCount(t *testing.T) {
 	if s := state(t, conn, id); s != sEscalated {
 		t.Fatalf("state %s, want escalated", s)
 	}
-	mustDo(t, e, conn, request(id, sEscalated, sReady, humanCaller, chHTTP))
+	decide := request(id, sEscalated, sReady, humanCaller, chHTTP)
+	decide.EscalatedAt = ptr(escalatedAtOf(t, conn, id)) // escalated here, not seeded
+	mustDo(t, e, conn, decide)
 	for i := 1; i <= 3; i++ {
 		if got, want := returnOnce(), map[bool]callbackapi.State{true: sEscalated, false: sReady}[i == 3]; got != want {
 			t.Fatalf("return %d after the human's move: state %s, want %s", i, got, want)

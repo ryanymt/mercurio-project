@@ -37,6 +37,7 @@ type claim struct {
 	from, to                 callbackapi.State
 	project, repoURL         string
 	branch, baseSHA, headSHA string
+	title                    string
 	token                    string
 	attempt                  int
 	tier                     *Tier // nil for the integrator
@@ -55,7 +56,8 @@ func (c *claim) request() (LaunchRequest, error) {
 		return LaunchRequest{}, err
 	}
 	r := LaunchRequest{TicketID: c.ticket, Project: c.project, RepoURL: c.repoURL, Role: c.role, ServiceAccount: sa,
-		Branch: c.branch, BaseSHA: c.baseSHA, HeadSHA: c.headSHA, ClaimToken: c.token, Attempt: c.attempt}
+		Branch: c.branch, BaseSHA: c.baseSHA, HeadSHA: c.headSHA, ClaimToken: c.token, Attempt: c.attempt,
+		Title: boundTitle(c.title)}
 	if c.tier != nil {
 		r.Provider, r.Model, r.Tier, r.Credential = c.tier.Provider, c.tier.Model, c.tier.Name, c.tier.Credential
 	}
@@ -201,7 +203,7 @@ func candidateSQL(q queue, filtered bool, lock string) string {
 	case filtered:
 		filter = " AND t.attempt_count = ANY($3::int[])"
 	}
-	return `SELECT t.id, t.attempt_count, coalesce(t.branch, ''), coalesce(t.base_sha, ''), coalesce(t.head_sha, '')
+	return `SELECT t.id, t.attempt_count, coalesce(t.branch, ''), coalesce(t.base_sha, ''), coalesce(t.head_sha, ''), t.title
 		FROM tickets t
 		WHERE t.project_id = $1 AND t.state = $2` + filter + `
 		  AND (t.parent_ticket_id IS NOT NULL OR NOT EXISTS (SELECT 1 FROM tickets c WHERE c.parent_ticket_id = t.id))
@@ -225,8 +227,8 @@ func (d *Dispatcher) hasCandidate(ctx context.Context, tx *sql.Tx, projectID str
 	}
 	var id int64
 	var n int
-	var b, base, hd string
-	err := tx.QueryRowContext(ctx, candidateSQL(q, true, ""), candidateArgs(projectID, q, attempts)...).Scan(&id, &n, &b, &base, &hd)
+	var b, base, hd, title string
+	err := tx.QueryRowContext(ctx, candidateSQL(q, true, ""), candidateArgs(projectID, q, attempts)...).Scan(&id, &n, &b, &base, &hd, &title)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -248,7 +250,7 @@ func (d *Dispatcher) claimFrom(ctx context.Context, tx *sql.Tx, p project, q que
 		c := &claim{role: q.role, from: q.from, to: q.to, project: p.id, repoURL: p.repoURL}
 		var count int
 		err := tx.QueryRowContext(ctx, candidateSQL(q, attempts != nil, "FOR UPDATE SKIP LOCKED"), candidateArgs(p.id, q, attempts)...).
-			Scan(&c.ticket, &count, &c.branch, &c.baseSHA, &c.headSHA)
+			Scan(&c.ticket, &count, &c.branch, &c.baseSHA, &c.headSHA, &c.title)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}

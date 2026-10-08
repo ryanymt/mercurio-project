@@ -82,6 +82,10 @@ const (
 	RoleRiskEvaluator Role = "risk_evaluator"
 	RoleIntegrator    Role = "integrator"
 	RoleHousekeeping  Role = "housekeeping"
+	// RoleViewer is the viewer's service account (P06 D4). It is a caller only while relaying a
+	// person's IAP assertion, and then the caller is that person: the engine refuses it as itself,
+	// and it is never an event's actor.
+	RoleViewer Role = "viewer"
 )
 
 // IsRunner reports whether r is a runner role: one scoped to a project and fenced by a claim token.

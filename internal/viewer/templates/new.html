@@ -1,0 +1,14 @@
+{{template "head" "new ticket"}}
+<h1>New ticket</h1>
+<form class="act new" method="post" action="/create">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<input type="hidden" name="key" value="{{.Key}}">
+<label>project <select name="project" required>{{range .Projects}}<option value="{{.}}">{{.}}</option>{{end}}</select></label>
+<label>title <input type="text" name="title" value="" required></label>
+<label>body <textarea name="body" rows="6"></textarea></label>
+<label>acceptance criteria, one per line <textarea name="criteria" rows="4"></textarea></label>
+<p class="note">With criteria the ticket is created ready, and the dispatcher may start it; without them it is a draft.</p>
+<button type="submit">create</button>
+</form>
+<p class="who">signed in as {{.Person}}</p>
+{{template "foot"}}

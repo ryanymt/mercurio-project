@@ -1,0 +1,24 @@
+{
+  "source": "P06 T2's desktop sign-in through IAP (plans/P06-transcripts-viewer/evidence/T2-iap-claims.json): the claims of a real IAP assertion for Cloud Run, as the viewer logged them. Tests replace iat and exp with times around their own clock, and sign with their own ES256 key.",
+  "header": {
+    "alg": "ES256",
+    "kid": "1F5uEQ",
+    "typ": "JWT"
+  },
+  "claims": {
+    "aud": "/projects/123456789012/locations/us-central1/services/viewer",
+    "azp": "/projects/123456789012/locations/us-central1/services/viewer",
+    "email": "operator@example.com",
+    "exp": 1791191378,
+    "google": {
+      "access_levels": [
+        "accessPolicies/111111111111/accessLevels/admin_access"
+      ]
+    },
+    "hd": "example.com",
+    "iat": 1791190778,
+    "identity_source": "GOOGLE",
+    "iss": "https://cloud.google.com/iap",
+    "sub": "accounts.google.com:100000000000000000001"
+  }
+}

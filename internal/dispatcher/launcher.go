@@ -27,6 +27,23 @@ type LaunchRequest struct {
 	Model          string           `json:"model,omitempty"`
 	Tier           string           `json:"tier,omitempty"`
 	Credential     string           `json:"credential,omitempty"` // the one secret to inject
+	Title          string           `json:"title,omitempty"`      // the ticket's, cut to MaxTitle characters
+}
+
+// MaxTitle bounds the title a launch request carries: it travels in the execution's environment,
+// and the API sets no limit (P06 Approach 7). The echo runner reads its instruction from it.
+const MaxTitle = 200
+
+// boundTitle cuts a title to MaxTitle characters, never inside one.
+func boundTitle(title string) string {
+	n := 0
+	for i := range title {
+		if n == MaxTitle {
+			return title[:i]
+		}
+		n++
+	}
+	return title
 }
 
 // Launcher starts a runner. Its contract (P04 D10): an error means the run definitely did not

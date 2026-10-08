@@ -1,15 +1,15 @@
-# The dispatcher's tick: Cloud Scheduler runs the dispatcher job every minute as its own account.
-# Created paused; `make resume` and `make pause` own its state, which Terraform ignores.
+# The dispatcher's tick: Cloud Scheduler runs the dispatcher job every two minutes as its own
+# account. Created paused; `make resume` and `make pause` own its state, which Terraform ignores.
 
 resource "google_cloud_scheduler_job" "dispatcher_tick" {
   name             = "dispatcher-tick"
   region           = var.region
-  description      = "Runs the dispatcher job once a minute"
-  schedule         = "* * * * *"
+  description      = "Runs the dispatcher job every two minutes"
+  schedule         = "*/2 * * * *"
   time_zone        = "Etc/UTC"
   paused           = true
   attempt_deadline = "30s"
-  # No retry_config: Cloud Scheduler's default is no retries (the next minute's tick is the retry),
+  # No retry_config: Cloud Scheduler's default is no retries (the next tick is the retry),
   # and it does not return an explicit retry_count of 0, so writing one is a diff on every plan.
 
   http_target {

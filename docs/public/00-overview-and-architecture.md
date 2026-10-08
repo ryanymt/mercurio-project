@@ -60,5 +60,6 @@ Foreman was constructed systematically across sequential development phases:
 * Phase P03 (Risk Evaluator): Pure-function risk evaluation, sterile Git diff extraction, and compiled-in protection for meta-control paths.
 * Phase P04 (Dispatcher): Priority queue dispatching (Integration, QA, New Work), provider budget gating, deadlock-free PostgreSQL row-level locks, and automated lease reaping.
 * Phase P05 (Echo Runner & Deployment): Physical provisioning on GCP (Cloud SQL, Cloud Run, Secret Manager), zero-log secret versioning, database permission hardening, and live end-to-end execution.
+* Phase P06 (Transcripts, Viewer, and Approvals): Zero-trust Cloud Storage capture, in-memory credential scrubber, self-verifying read-only viewer on Cloud Run behind IAP, and cryptographic approvals bound to reviewed commits.
 
 The following documents detail the exact technical choices, engineering rationale, and security defenses for each phase.

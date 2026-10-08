@@ -270,13 +270,21 @@ func TestQAShaMismatch(t *testing.T) {
 	if headOf(t, conn, id).Valid {
 		t.Fatal("head_sha survived a QA mismatch")
 	}
-	_, err := do(t, e, conn, request(id, sEscalated, sApproved, humanCaller, chHTTP))
+	// Decided on the escalation as it happened here: an approval has no commit to land (409), a
+	// return to ready is applied.
+	at := escalatedAtOf(t, conn, id)
+	approve := request(id, sEscalated, sApproved, humanCaller, chHTTP)
+	approve.EscalatedAt = &at
+	_, err := do(t, e, conn, approve)
 	wantStatus(t, err, 409)
-	mustDo(t, e, conn, request(id, sEscalated, sReady, humanCaller, chHTTP))
+	ready := request(id, sEscalated, sReady, humanCaller, chHTTP)
+	ready.EscalatedAt = &at
+	mustDo(t, e, conn, ready)
 }
 
 // head_sha: required on submission and approval, refused elsewhere, stored, cleared on every move
-// to ready, kept through merging and merged.
+// to ready, kept through merging and merged. A person's approval and a dev runner's escalation take
+// one too (transitions_binding_test.go, P06 T4).
 func TestHeadShaLifecycle(t *testing.T) {
 	e := newEngine(nil)
 	t.Run("required and well-formed on submission", func(t *testing.T) {
@@ -309,7 +317,7 @@ func TestHeadShaLifecycle(t *testing.T) {
 			from, to callbackapi.State
 			caller   callbackapi.Caller
 			ch       callbackapi.Channel
-		}{{sInProgress, sReady, dev, chHTTP}, {sInQA, sReady, qa, chHTTP}, {sAwaiting, sInQA, dispatcherCaller, chCore}, {sEscalated, sApproved, humanCaller, chHTTP}} {
+		}{{sInProgress, sReady, dev, chHTTP}, {sInQA, sReady, qa, chHTTP}, {sAwaiting, sInQA, dispatcherCaller, chCore}, {sEscalated, sReady, humanCaller, chHTTP}} {
 			id := seed(t, conn, fixture{state: c.from, attempts: 1})
 			r := request(id, c.from, c.to, c.caller, c.ch)
 			r.HeadSHA = fixtureSHA

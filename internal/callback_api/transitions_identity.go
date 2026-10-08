@@ -19,16 +19,24 @@ import (
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	jose "github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4/jwt"
 )
 
 // Identity is verified here, not upstream (docs/architecture.md): every caller presents a
 // Google-signed ID token, and the verified email alone decides who it is. Nothing in a request
-// body can name a role or a project.
+// body can name a role or a project. A person presents no token of their own: the viewer, behind
+// IAP, relays their IAP assertion, and that is verified here too (P06 D4, D20).
 
 const (
 	// GoogleJWKSURL is where Google publishes the keys that sign its ID tokens.
 	GoogleJWKSURL = "https://www.googleapis.com/oauth2/v3/certs"
 	googleIssuer  = "https://accounts.google.com" // go-oidc also accepts accounts.google.com
+
+	// IAPJWKSURL is where IAP publishes the keys that sign its assertions (ES256).
+	IAPJWKSURL = "https://www.gstatic.com/iap/verify/public_key-jwk"
+	iapIssuer  = "https://cloud.google.com/iap"
+	// iapLeeway is the clock skew allowed on an assertion's times.
+	iapLeeway = 30 * time.Second
 )
 
 //go:embed transitions_identity_map.json
@@ -57,7 +65,7 @@ func isServiceAccount(email string) bool {
 	return domain == "gserviceaccount.com" || strings.HasSuffix(domain, ".gserviceaccount.com")
 }
 
-var mappableRoles = []Role{RoleHuman, RoleDispatcher, RoleSpec, RoleArchitect, RoleDev, RoleQA, RoleIntegrator}
+var mappableRoles = []Role{RoleHuman, RoleDispatcher, RoleSpec, RoleArchitect, RoleDev, RoleQA, RoleIntegrator, RoleViewer}
 
 // LoadIdentityMap parses and checks a map. It refuses a service account mapped to human, a
 // person mapped to an agent role, a runner without a project, a project on anything else,
@@ -106,17 +114,22 @@ func (m *IdentityMap) Len() int { return len(m.byEmail) }
 
 // VerifierConfig configures token verification.
 type VerifierConfig struct {
-	JWKSURL         string           // default GoogleJWKSURL
-	ServiceAudience string           // required: the audience service accounts mint tokens for
-	HumanAudiences  []string         // no default: with none, no human can authenticate
-	Now             func() time.Time // tests only
+	JWKSURL         string // default GoogleJWKSURL
+	ServiceAudience string // required: the audience service accounts mint tokens for
+	// IAPAudience is the viewer's IAP audience, /projects/<number>/locations/<region>/services/viewer.
+	// With none, no relayed person is accepted.
+	IAPAudience string
+	IAPJWKSURL  string           // default IAPJWKSURL
+	Now         func() time.Time // tests only
 }
 
-// Verifier turns a bearer token into a Caller.
+// Verifier turns a bearer token, or a person's relayed IAP assertion, into a Caller.
 type Verifier struct {
 	oidc    *oidc.IDTokenVerifier
 	service string
-	humans  []string
+	iapAud  string
+	iapKeys *keySet
+	now     func() time.Time
 	ids     *IdentityMap
 }
 
@@ -131,19 +144,28 @@ func NewVerifier(ctx context.Context, cfg VerifierConfig, ids *IdentityMap) (*Ve
 	if cfg.JWKSURL == "" {
 		cfg.JWKSURL = GoogleJWKSURL
 	}
-	if err := checkJWKSURL(cfg.JWKSURL); err != nil {
-		return nil, err
+	if cfg.IAPJWKSURL == "" {
+		cfg.IAPJWKSURL = IAPJWKSURL
+	}
+	for _, u := range []string{cfg.JWKSURL, cfg.IAPJWKSURL} {
+		if err := checkJWKSURL(u); err != nil {
+			return nil, err
+		}
 	}
 	now := cfg.Now
 	if now == nil {
 		now = time.Now
 	}
-	keys := &keySet{url: cfg.JWKSURL, client: &http.Client{Timeout: keyFetchTimeout}, now: now}
+	client := &http.Client{Timeout: keyFetchTimeout}
+	keys := &keySet{url: cfg.JWKSURL, algs: []jose.SignatureAlgorithm{jose.RS256}, client: client, now: now}
 	v := oidc.NewVerifier(googleIssuer, keys, &oidc.Config{
-		SkipClientIDCheck: true, // the audience is checked below, per kind of identity
+		SkipClientIDCheck: true, // the audience is checked below
 		Now:               cfg.Now,
 	})
-	return &Verifier{oidc: v, service: cfg.ServiceAudience, humans: cfg.HumanAudiences, ids: ids}, nil
+	// IAP's keys are their own set, fetched from IAP's URL and limited apart from Google's.
+	iapKeys := &keySet{url: cfg.IAPJWKSURL, algs: []jose.SignatureAlgorithm{jose.ES256}, client: client, now: now}
+	return &Verifier{oidc: v, service: cfg.ServiceAudience, iapAud: cfg.IAPAudience, iapKeys: iapKeys, now: now,
+		ids: ids}, nil
 }
 
 type googleClaims struct {
@@ -151,9 +173,9 @@ type googleClaims struct {
 	EmailVerified *bool  `json:"email_verified"`
 }
 
-// Verify checks, in order: signature, expiry and issuer; a verified email; an audience in the
-// service audience or the human audiences (all 401); the kind from the email and that kind's own
-// audience (401); then the identity map (403 when unmapped).
+// Verify checks, in order: signature, expiry and issuer; a verified email; the service audience; a
+// service account's email (all 401: a person's own token is never accepted, whatever its audience,
+// since a person acts only through the viewer); then the identity map (403 when unmapped).
 func (v *Verifier) Verify(ctx context.Context, raw string) (Caller, error) {
 	if raw == "" {
 		return Caller{}, refuse(401, "a bearer token is required")
@@ -171,15 +193,11 @@ func (v *Verifier) Verify(ctx context.Context, raw string) (Caller, error) {
 	}
 	email := strings.ToLower(cl.Email)
 
-	if !slices.Contains(tok.Audience, v.service) && !slices.ContainsFunc(tok.Audience, v.isHumanAudience) {
+	if !slices.Contains(tok.Audience, v.service) {
 		return Caller{}, refuse(401, "the token is not for this service")
 	}
-	if isServiceAccount(email) {
-		if !slices.Contains(tok.Audience, v.service) {
-			return Caller{}, refuse(401, "a service account's token must carry the service audience")
-		}
-	} else if !slices.ContainsFunc(tok.Audience, v.isHumanAudience) {
-		return Caller{}, refuse(401, "a person's token must carry a human audience")
+	if !isServiceAccount(email) {
+		return Caller{}, refuse(401, "a person's own token is not accepted: a person acts through the viewer")
 	}
 
 	c, ok := v.ids.Lookup(email)
@@ -189,7 +207,52 @@ func (v *Verifier) Verify(ctx context.Context, raw string) (Caller, error) {
 	return c, nil
 }
 
-func (v *Verifier) isHumanAudience(aud string) bool { return slices.Contains(v.humans, aud) }
+// iapClaims are the claims an IAP assertion is judged by.
+type iapClaims struct {
+	jwt.Claims
+	Email string `json:"email"`
+}
+
+// VerifyRelayed turns a person's IAP assertion, relayed by the viewer, into that person (P06 D4). It
+// checks, in order: that the viewer's audience is configured; the ES256 signature under IAP's
+// published keys; IAP's issuer, the viewer's audience, and an expiry and issue time, each within
+// iapLeeway; an email that is not a service account's (all 401); then the identity map, where it
+// must be a person (403). IAP sends no email_verified, and none is asked for.
+func (v *Verifier) VerifyRelayed(ctx context.Context, raw string) (Caller, error) {
+	if v.iapAud == "" {
+		return Caller{}, refuse(401, "no IAP audience is configured, so no relayed person is accepted")
+	}
+	if raw == "" {
+		return Caller{}, refuse(401, "an IAP assertion is required")
+	}
+	payload, err := v.iapKeys.VerifySignature(ctx, raw)
+	if err != nil {
+		return Caller{}, refuse(401, "invalid IAP assertion: %v", err)
+	}
+	var cl iapClaims
+	if err := json.Unmarshal(payload, &cl); err != nil {
+		return Caller{}, refuse(401, "unreadable IAP assertion claims")
+	}
+	if cl.Expiry == nil || cl.IssuedAt == nil {
+		return Caller{}, refuse(401, "the IAP assertion carries no expiry or issue time")
+	}
+	if err := cl.ValidateWithLeeway(jwt.Expected{Issuer: iapIssuer, AnyAudience: jwt.Audience{v.iapAud}, Time: v.now()},
+		iapLeeway); err != nil {
+		return Caller{}, refuse(401, "invalid IAP assertion: %v", err)
+	}
+	email := strings.ToLower(cl.Email)
+	if email == "" || isServiceAccount(email) {
+		return Caller{}, refuse(401, "a relayed IAP assertion must name a person")
+	}
+	c, ok := v.ids.Lookup(email)
+	if !ok {
+		return Caller{}, refuse(403, "%s is not a known identity", email)
+	}
+	if c.Role != RoleHuman {
+		return Caller{}, refuse(403, "%s is not a person", email)
+	}
+	return c, nil
+}
 
 // checkJWKSURL accepts only an https key URL, so the keys that decide every identity cannot be
 // swapped on the way ([P02/review]); plain http is allowed to a loopback address, the tests' key
@@ -216,10 +279,11 @@ const (
 	keyFetchTimeout = 10 * time.Second
 )
 
-// keySet verifies a token's signature with Google's published keys, fetching them when a token's
-// key is not among those held, at most once every minKeyRefetch.
+// keySet verifies a token's signature with published keys (Google's, or IAP's), fetching them when
+// a token's key is not among those held, at most once every minKeyRefetch.
 type keySet struct {
 	url    string
+	algs   []jose.SignatureAlgorithm // the only algorithms a token may be signed with
 	client *http.Client
 	now    func() time.Time
 
@@ -230,9 +294,9 @@ type keySet struct {
 	fetched time.Time // the last fetch, successful or not; zero before the first
 }
 
-// VerifySignature implements oidc.KeySet. The verifier has already checked the algorithm.
+// VerifySignature implements oidc.KeySet: a token signed with any algorithm but k.algs is refused.
 func (k *keySet) VerifySignature(ctx context.Context, raw string) ([]byte, error) {
-	jws, err := jose.ParseSigned(raw, []jose.SignatureAlgorithm{jose.RS256})
+	jws, err := jose.ParseSigned(raw, k.algs)
 	if err != nil {
 		return nil, fmt.Errorf("malformed token: %w", err)
 	}

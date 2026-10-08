@@ -23,7 +23,7 @@ import (
 
 const (
 	serviceAudience = "https://callback-api.example.test"
-	humanAudience   = "foreman-cli.apps.googleusercontent.com"
+	humanAudience   = "foreman-cli.apps.googleusercontent.com" // an OAuth client's: never accepted (P06 D20)
 	devEmail        = "dev-foreman@your-project-id.iam.gserviceaccount.com"
 	humanEmail      = "operator@example.com"
 	defaultCompute  = "123456789012-compute@developer.gserviceaccount.com"
@@ -76,10 +76,16 @@ type keyServer struct {
 }
 
 func newKeyServer(t *testing.T, keys ...signer) *keyServer {
-	ks := &keyServer{}
+	var jwks []jose.JSONWebKey
 	for _, k := range keys {
-		ks.keys = append(ks.keys, k.public())
+		jwks = append(jwks, k.public())
 	}
+	return newKeyServerOf(t, jwks...)
+}
+
+// newKeyServerOf publishes any keys, IAP's EC keys included.
+func newKeyServerOf(t *testing.T, keys ...jose.JSONWebKey) *keyServer {
+	ks := &keyServer{keys: keys}
 	ks.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ks.mu.Lock()
 		defer ks.mu.Unlock()
@@ -94,10 +100,12 @@ func newKeyServer(t *testing.T, keys ...signer) *keyServer {
 	return ks
 }
 
-func (ks *keyServer) add(s signer) {
+func (ks *keyServer) add(s signer) { ks.addKey(s.public()) }
+
+func (ks *keyServer) addKey(k jose.JSONWebKey) {
 	ks.mu.Lock()
 	defer ks.mu.Unlock()
-	ks.keys = append(ks.keys, s.public())
+	ks.keys = append(ks.keys, k)
 }
 
 func claimsFor(email string, aud any) map[string]any {
@@ -114,14 +122,14 @@ const testMap = `[
   {"email": "operator@example.com", "role": "human"}
 ]`
 
-func verifier(t *testing.T, ks *keyServer, humanAudiences ...string) *callbackapi.Verifier {
+func verifier(t *testing.T, ks *keyServer) *callbackapi.Verifier {
 	t.Helper()
 	ids, err := callbackapi.LoadIdentityMap([]byte(testMap))
 	if err != nil {
 		t.Fatal(err)
 	}
 	v, err := callbackapi.NewVerifier(context.Background(), callbackapi.VerifierConfig{
-		JWKSURL: ks.URL, ServiceAudience: serviceAudience, HumanAudiences: humanAudiences,
+		JWKSURL: ks.URL, ServiceAudience: serviceAudience,
 	}, ids)
 	if err != nil {
 		t.Fatal(err)
@@ -129,9 +137,11 @@ func verifier(t *testing.T, ks *keyServer, humanAudiences ...string) *callbackap
 	return v
 }
 
-func TestVerifiesServiceAccountsAndHumans(t *testing.T) {
+// A service account's token for the service audience is that account; a person's own token is
+// never accepted (transitions_relay_test.go: a person acts only through the viewer, P06 D20).
+func TestVerifiesServiceAccounts(t *testing.T) {
 	k := newSigner(t, "k1")
-	v := verifier(t, newKeyServer(t, k), humanAudience)
+	v := verifier(t, newKeyServer(t, k))
 
 	c, err := v.Verify(context.Background(), k.sign(t, claimsFor(devEmail, serviceAudience)))
 	if err != nil {
@@ -140,18 +150,15 @@ func TestVerifiesServiceAccountsAndHumans(t *testing.T) {
 	if c.Email != devEmail || c.Role != callbackapi.RoleDev || c.Project != "foreman" {
 		t.Fatalf("service account = %+v", c)
 	}
-	h, err := v.Verify(context.Background(), k.sign(t, claimsFor(humanEmail, []string{humanAudience, "another"})))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if h.Role != callbackapi.RoleHuman || h.Project != "" {
-		t.Fatalf("human = %+v", h)
+	c, err = v.Verify(context.Background(), k.sign(t, claimsFor(devEmail, []string{serviceAudience, "another"})))
+	if err != nil || c.Email != devEmail {
+		t.Fatalf("with a second audience: %+v, %v", c, err)
 	}
 }
 
 func TestBothGoogleIssuerFormsAndNoOther(t *testing.T) {
 	k := newSigner(t, "k1")
-	v := verifier(t, newKeyServer(t, k), humanAudience)
+	v := verifier(t, newKeyServer(t, k))
 	for iss, ok := range map[string]bool{
 		"https://accounts.google.com": true, "accounts.google.com": true, "https://evil.example": false,
 	} {
@@ -180,8 +187,7 @@ func TestVerificationRefusals(t *testing.T) {
 		return strings.Join(parts, ".")
 	}
 	ks := newKeyServer(t, k)
-	v := verifier(t, ks, humanAudience)
-	noHumans := verifier(t, ks)
+	v := verifier(t, ks)
 	with := func(email string, aud any, mod func(map[string]any)) map[string]any {
 		c := claimsFor(email, aud)
 		if mod != nil {
@@ -199,17 +205,17 @@ func TestVerificationRefusals(t *testing.T) {
 		{"not a JWT", v, "not.a.token", 401},
 		{"signed by an unknown key", v, stranger.sign(t, claimsFor(devEmail, serviceAudience)), 401},
 		{"forged under a published key id", v, forger.sign(t, claimsFor(devEmail, serviceAudience)), 401},
-		{"payload altered after signing", v, alter(k.sign(t, claimsFor(devEmail, serviceAudience)), claimsFor(humanEmail, humanAudience)), 401},
+		{"payload altered after signing", v, alter(k.sign(t, claimsFor(devEmail, serviceAudience)), claimsFor("dispatcher@your-project-id.iam.gserviceaccount.com", serviceAudience)), 401},
 		{"expired", v, k.sign(t, with(devEmail, serviceAudience, func(c map[string]any) { c["exp"] = time.Now().Add(-time.Hour).Unix() })), 401},
 		{"email not verified", v, k.sign(t, with(devEmail, serviceAudience, func(c map[string]any) { c["email_verified"] = false })), 401},
 		{"email_verified missing", v, k.sign(t, with(devEmail, serviceAudience, func(c map[string]any) { delete(c, "email_verified") })), 401},
 		{"no email", v, k.sign(t, with(devEmail, serviceAudience, func(c map[string]any) { delete(c, "email") })), 401},
-		{"audience in neither list", v, k.sign(t, claimsFor(devEmail, "https://someone-else.example")), 401},
-		{"service account with a human audience", v, k.sign(t, claimsFor(devEmail, humanAudience)), 401},
-		{"human with the service audience", v, k.sign(t, claimsFor(humanEmail, serviceAudience)), 401},
-		{"human, no human audience configured", noHumans, k.sign(t, claimsFor(humanEmail, humanAudience)), 401},
-		{"unmapped service account", v, k.sign(t, claimsFor("viewer@your-project-id.iam.gserviceaccount.com", serviceAudience)), 403},
-		{"unmapped human", v, k.sign(t, claimsFor("someone@example.com", humanAudience)), 403},
+		{"another audience", v, k.sign(t, claimsFor(devEmail, "https://someone-else.example")), 401},
+		{"service account with an OAuth client's audience", v, k.sign(t, claimsFor(devEmail, humanAudience)), 401},
+		{"a person, with the service audience", v, k.sign(t, claimsFor(humanEmail, serviceAudience)), 401},
+		{"a person, with an OAuth client's audience", v, k.sign(t, claimsFor(humanEmail, humanAudience)), 401},
+		{"unmapped service account", v, k.sign(t, claimsFor("callback-api@your-project-id.iam.gserviceaccount.com", serviceAudience)), 403},
+		{"unmapped person", v, k.sign(t, claimsFor("someone@example.com", serviceAudience)), 401},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -223,7 +229,7 @@ func TestVerificationRefusals(t *testing.T) {
 // (which holds Editor): never classed as a human, whatever audience it carries.
 func TestAnyGServiceAccountDomainIsAServiceAccount(t *testing.T) {
 	k := newSigner(t, "k1")
-	v := verifier(t, newKeyServer(t, k), humanAudience)
+	v := verifier(t, newKeyServer(t, k))
 	_, err := v.Verify(context.Background(), k.sign(t, claimsFor(defaultCompute, humanAudience)))
 	wantStatus(t, err, 401) // a service account must carry the service audience
 	_, err = v.Verify(context.Background(), k.sign(t, claimsFor(defaultCompute, serviceAudience)))
@@ -232,7 +238,7 @@ func TestAnyGServiceAccountDomainIsAServiceAccount(t *testing.T) {
 
 func TestEmailsCompareLowerCased(t *testing.T) {
 	k := newSigner(t, "k1")
-	v := verifier(t, newKeyServer(t, k), humanAudience)
+	v := verifier(t, newKeyServer(t, k))
 	c, err := v.Verify(context.Background(), k.sign(t, claimsFor(strings.ToUpper(devEmail), serviceAudience)))
 	if err != nil || c.Role != callbackapi.RoleDev || c.Email != devEmail {
 		t.Fatalf("upper-case email: %+v, %v", c, err)
@@ -273,7 +279,7 @@ func verifierAt(t *testing.T, ks *keyServer, now func() time.Time) *callbackapi.
 		t.Fatal(err)
 	}
 	v, err := callbackapi.NewVerifier(context.Background(), callbackapi.VerifierConfig{
-		JWKSURL: ks.URL, ServiceAudience: serviceAudience, HumanAudiences: []string{humanAudience}, Now: now,
+		JWKSURL: ks.URL, ServiceAudience: serviceAudience, Now: now,
 	}, ids)
 	if err != nil {
 		t.Fatal(err)
@@ -492,6 +498,8 @@ func TestIdentityMapRefusals(t *testing.T) {
 		"a project on a non-runner":         `[{"email": "dispatcher@x.iam.gserviceaccount.com", "role": "dispatcher", "project": "foreman"}]`,
 		"an internal role":                  `[{"email": "cb@x.iam.gserviceaccount.com", "role": "callback_api"}]`,
 		"an unknown role":                   `[{"email": "x@x.iam.gserviceaccount.com", "role": "root"}]`,
+		"a person mapped to viewer":         `[{"email": "someone@example.com", "role": "viewer"}]`,
+		"the viewer scoped to a project":    `[{"email": "viewer@x.iam.gserviceaccount.com", "role": "viewer", "project": "foreman"}]`,
 		"a duplicate, differently cased":    `[{"email": "a@example.com", "role": "human"}, {"email": "A@example.com", "role": "human"}]`,
 		"not JSON":                          `{`,
 	} {
@@ -503,9 +511,9 @@ func TestIdentityMapRefusals(t *testing.T) {
 	}
 }
 
-// The production map: the role-bearing service accounts of foreman and the sandbox (P05) and the
-// organisation account;
-// viewer, callback-api and the default compute account deliberately absent (P02 Approach 4).
+// The production map: the role-bearing service accounts of foreman and the sandbox (P05), the
+// viewer, which relays a person (P06 D4), and the organisation account, the only person (P06
+// Anchor v2); callback-api and the default compute account deliberately absent (P02 Approach 4).
 func TestEmbeddedIdentityMap(t *testing.T) {
 	m, err := callbackapi.EmbeddedIdentityMap()
 	if err != nil {
@@ -524,6 +532,7 @@ func TestEmbeddedIdentityMap(t *testing.T) {
 		"spec-sandbox" + sa:       {Role: callbackapi.RoleSpec, Project: "sandbox"},
 		"architect-sandbox" + sa:  {Role: callbackapi.RoleArchitect, Project: "sandbox"},
 		"integrator-sandbox" + sa: {Role: callbackapi.RoleIntegrator, Project: "sandbox"},
+		"viewer" + sa:             {Role: callbackapi.RoleViewer},
 		humanEmail:                {Role: callbackapi.RoleHuman},
 	}
 	for email, w := range want {
@@ -532,7 +541,7 @@ func TestEmbeddedIdentityMap(t *testing.T) {
 			t.Errorf("%s = %+v (found %v), want %+v", email, c, ok, w)
 		}
 	}
-	for _, email := range []string{"viewer" + sa, "callback-api" + sa, "assistant-vm" + sa, defaultCompute} {
+	for _, email := range []string{"callback-api" + sa, "assistant-vm" + sa, defaultCompute} {
 		if _, ok := m.Lookup(email); ok {
 			t.Errorf("%s must not be mapped", email)
 		}

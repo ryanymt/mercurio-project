@@ -1,0 +1,23 @@
+body { font: 15px/1.45 system-ui, sans-serif; margin: 0; color: #1d1d1f; background: #fff; }
+header { padding: .6em 1em; background: #24292f; }
+header a { color: #fff; margin-right: 1.2em; text-decoration: none; }
+main { padding: 1em; max-width: 72em; }
+h1 { font-size: 1.4em; } h2 { font-size: 1.15em; margin-top: 1.6em; }
+table { border-collapse: collapse; width: 100%; } th, td { text-align: left; padding: .3em .5em; border-bottom: 1px solid #ddd; vertical-align: top; }
+pre { white-space: pre-wrap; word-break: break-word; background: #f6f8fa; padding: .5em; margin: .3em 0; font-size: 13px; }
+.sha { font-family: ui-monospace, monospace; font-size: 13px; }
+dl { display: grid; grid-template-columns: max-content auto; gap: .2em 1em; } dt { color: #666; }
+.runner-label { margin: .4em 0 0; color: #8a5a00; font-size: 13px; }
+.runner-text { margin: .2em 0 .6em; padding: .4em .8em; border-left: 4px solid #d4a72c; background: #fff8e5; }
+.good { color: #1a7f37; } .bad { color: #cf222e; font-weight: 600; } .note { color: #8a5a00; }
+.step summary { cursor: pointer; } .step.error > summary { color: #cf222e; }
+.kind { display: inline-block; min-width: 5.5em; color: #666; font-size: 12px; text-transform: uppercase; }
+.diff .d- { color: #cf222e; } .diff .d\+ { color: #1a7f37; }
+.udiff .add { color: #1a7f37; background: #e6ffec; } .udiff .del { color: #cf222e; background: #ffebe9; }
+.udiff .hunk { color: #0550ae; } .udiff .file { font-weight: 600; } .files { font-size: 13px; }
+.timeline { padding-left: 1.5em; } .who { color: #666; font-size: 12px; margin-top: 2em; }
+form.act { display: inline-block; margin: .3em .6em .3em 0; padding: .5em; border: 1px solid #ddd; }
+form.act label { display: block; margin-bottom: .4em; font-size: 13px; color: #666; }
+form.new { display: block; max-width: 40em; } form.new input[type=text], form.new textarea { display: block; width: 100%; box-sizing: border-box; }
+button { font: inherit; padding: .4em .9em; } button.risky { border: 2px solid #cf222e; color: #cf222e; }
+@media (max-width: 40em) { th:nth-child(5), td:nth-child(5) { display: none; } }

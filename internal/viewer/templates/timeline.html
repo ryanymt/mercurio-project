@@ -1,0 +1,18 @@
+{{template "head" .A.Kind}}
+<h1><a href="/tickets/{{.T.ID}}">#{{.T.ID}}</a> {{.A.Kind}}, attempt {{.A.Attempt}}</h1>
+<p class="path">{{.A.Path}}</p>
+<p class="harness">{{with .Timeline.Header}}{{.Harness}} {{.Version}}, {{.Format}}{{else}}no header{{end}}:
+{{if .Timeline.Adapter}}read by the {{.Timeline.Adapter}} adapter{{else}}no adapter reads it, so its lines are shown as they are{{end}}</p>
+{{range .Notes}}<p class="note">{{.}}</p>{{end}}
+<form method="get" class="filters"><label>filter <input name="q" value="{{.Q}}" size="30"></label> <button type="submit">filter</button></form>
+<ol class="timeline">
+{{range .Timeline.Steps}}<li><details class="step {{.Kind}}{{if .Error}} error{{end}}"{{if ne .Kind "meta"}} open{{end}}>
+<summary><span class="kind">{{.Kind}}</span> {{.Title}}{{if .Error}} <span class="bad">failed</span>{{end}}</summary>
+{{with .Body}}<pre>{{.}}</pre>{{end}}
+{{with .Diff}}<pre class="diff">{{range .}}<span class="d{{printf "%c" .Op}}">{{printf "%c" .Op}}{{.Text}}</span>
+{{end}}</pre>{{end}}
+{{if or (eq .Kind "raw") (eq .Kind "meta")}}<pre class="raw">{{.Raw}}</pre>{{end}}
+</details></li>
+{{else}}<li>no steps{{if .Q}} hold “{{.Q}}”{{end}}</li>
+{{end}}</ol>
+{{template "foot"}}

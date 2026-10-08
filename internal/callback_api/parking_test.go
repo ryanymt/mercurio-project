@@ -11,10 +11,12 @@ import (
 	callbackapi "github.com/ryanymt/mercurio-project/internal/callback_api"
 )
 
+// park asks to park or unpark id, naming the seeded escalation (P06 D19).
 func park(id int64, c callbackapi.Caller, parked bool, reason string, until *time.Time) callbackapi.ParkingRequest {
+	at := fixtureEscalatedAt
 	return callbackapi.ParkingRequest{
-		TicketID: id, Caller: c, Parked: parked, Reason: reason, Until: until, RequestID: newRequestID(),
-		Method: "PUT", Path: fmt.Sprintf("/v1/tickets/%d/parking", id),
+		TicketID: id, Caller: c, Parked: parked, Reason: reason, Until: until, EscalatedAt: &at,
+		RequestID: newRequestID(), Method: "PUT", Path: fmt.Sprintf("/v1/tickets/%d/parking", id),
 	}
 }
 

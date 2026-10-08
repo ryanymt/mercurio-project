@@ -34,14 +34,14 @@ func NewServer(db *sql.DB, engine *Engine, auth Authenticator, log *slog.Logger)
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.health)
-	mux.Handle("POST /v1/tickets", s.handle(s.create))
-	mux.Handle("POST /v1/tickets/{id}/transitions", s.handle(s.transition))
-	mux.Handle("POST /v1/tickets/{id}/decompose", s.handle(s.decompose))
-	mux.Handle("POST /v1/tickets/{id}/heartbeat", s.handle(s.heartbeat))
-	mux.Handle("POST /v1/tickets/{id}/artifacts", s.handle(s.artifact))
-	mux.Handle("POST /v1/tickets/{id}/rate-limit", s.handle(s.rateLimit))
-	mux.Handle("PUT /v1/tickets/{id}/parking", s.handle(s.park))
-	mux.Handle("POST /v1/promotions", s.handle(s.promote))
+	mux.Handle("POST /v1/tickets", s.handle(s.create, relayable))
+	mux.Handle("POST /v1/tickets/{id}/transitions", s.handle(s.transition, relayable))
+	mux.Handle("POST /v1/tickets/{id}/decompose", s.handle(s.decompose, direct))
+	mux.Handle("POST /v1/tickets/{id}/heartbeat", s.handle(s.heartbeat, direct))
+	mux.Handle("POST /v1/tickets/{id}/artifacts", s.handle(s.artifact, direct))
+	mux.Handle("POST /v1/tickets/{id}/rate-limit", s.handle(s.rateLimit, direct))
+	mux.Handle("PUT /v1/tickets/{id}/parking", s.handle(s.park, relayable))
+	mux.Handle("POST /v1/promotions", s.handle(s.promote, direct))
 	return mux
 }
 

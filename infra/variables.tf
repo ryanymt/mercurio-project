@@ -31,6 +31,25 @@ variable "zone" {
   default     = null
 }
 
+variable "operator_emails" {
+  description = "The people IAP admits to the viewer: Google accounts of the project's organization (IAP's Google-managed sign-in admits no others). Each must also be a `human` in the identity map compiled into the callback API."
+  type        = list(string)
+  validation {
+    condition     = length(var.operator_emails) > 0 && alltrue([for e in var.operator_emails : can(regex("^[^@\\s:]+@[^@\\s]+$", e))])
+    error_message = "operator_emails must list at least one email address (no \"user:\" prefix)."
+  }
+}
+
+variable "viewer_extra_origins" {
+  description = "Optional: more https origins the viewer accepts a form from, besides its deterministic URL; for example the URL Cloud Run gave the service when it was created, if you open the viewer through that one."
+  type        = list(string)
+  default     = []
+  validation {
+    condition     = alltrue([for o in var.viewer_extra_origins : can(regex("^https://[^/]+$", o))])
+    error_message = "Each origin must be https://<host>, with no path or trailing slash."
+  }
+}
+
 variable "billing_account" {
   description = "Optional: the billing account (XXXXXX-XXXXXX-XXXXXX) to put a monthly budget on. No budget unless monthly_budget_usd is set too."
   type        = string

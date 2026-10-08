@@ -70,6 +70,11 @@ ephemeral "random_password" "app" {
   special = false
 }
 
+ephemeral "random_password" "viewer" {
+  length  = 40
+  special = false
+}
+
 # Owns the schema: the migrate job runs as it. Cloud SQL makes it a cloudsqlsuperuser member.
 resource "google_sql_user" "migrator" {
   name                = "migrator"
@@ -89,6 +94,19 @@ resource "google_sql_user" "app" {
   instance            = google_sql_database_instance.foreman.name
   type                = "BUILT_IN"
   password_wo         = ephemeral.random_password.app.result
+  password_wo_version = 1
+  database_roles      = ["pg_read_all_stats"]
+}
+
+# The viewer's user: SELECT on the five tables only, granted by migration 00008, which grants
+# nothing while this user does not exist, so it is created before the migration runs. Its roles,
+# like app's, name pg_read_all_stats so Cloud SQL does not add cloudsqlsuperuser; the viewer checks
+# its own rights at startup and refuses to start if it could write.
+resource "google_sql_user" "viewer" {
+  name                = "viewer"
+  instance            = google_sql_database_instance.foreman.name
+  type                = "BUILT_IN"
+  password_wo         = ephemeral.random_password.viewer.result
   password_wo_version = 1
   database_roles      = ["pg_read_all_stats"]
 }

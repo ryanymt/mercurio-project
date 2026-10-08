@@ -309,7 +309,9 @@ func TestEscalationBookkeepingAndParkingCleared(t *testing.T) {
 	if _, err := conn.Exec(`UPDATE tickets SET parked = true, parked_reason = 'later' WHERE id = $1`, id); err != nil {
 		t.Fatal(err)
 	}
-	mustDo(t, e, conn, request(id, sEscalated, sReady, humanCaller, chHTTP))
+	decide := request(id, sEscalated, sReady, humanCaller, chHTTP)
+	decide.EscalatedAt = ptr(escalatedAtOf(t, conn, id)) // escalated here, not seeded
+	mustDo(t, e, conn, decide)
 	if k := cols(t, conn, id); k.Parked || k.ParkedReason.Valid {
 		t.Fatalf("leaving escalated must clear parking (D21): %+v", k)
 	}

@@ -5,6 +5,14 @@ project_id     = "your-project-id"
 project_number = "123456789012" # gcloud projects describe your-project-id --format='value(projectNumber)'
 region         = "us-central1"
 
+# The people IAP admits to the viewer: accounts of the project's organization. Each must also be a
+# "human" in internal/callback_api/transitions_identity_map.json.
+operator_emails = ["operator@example.com"]
+
+# Optional: the URL Cloud Run gave the viewer when it was created, if you open it through that one
+# (gcloud run services describe viewer --region us-central1 --format='value(urls)').
+# viewer_extra_origins = ["https://viewer-xxxxxxxxxx-uc.a.run.app"]
+
 # Optional: a monthly budget on the project, alerting at 50%, 90% and 100% of current spend.
 # billing_account    = "XXXXXX-XXXXXX-XXXXXX"
 # monthly_budget_usd = 50

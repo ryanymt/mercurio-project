@@ -37,11 +37,17 @@ type TransitionRequest struct {
 	ClaimToken         string          // X-Foreman-Claim-Token; runners on a leased ticket
 	Payload            json.RawMessage // optional JSON object, kept in the event
 	AcceptanceCriteria []Criterion     // draft -> ready only
-	HeadSHA            string          // the commit submitted (in_progress -> awaiting_review) or tested (in_qa -> approved)
-	Branch             string          // the dispatcher's new-work claim: foreman/<ticket>/<attempt it starts>
-	BaseSHA            string          // the dispatcher's new-work claim: the default branch's head
-	Return             ReturnKind      // the dispatcher's returns from a leased state
-	Method, Path       string          // name the request for the request log
+	// HeadSHA is the commit submitted (in_progress -> awaiting_review), tested (in_qa -> approved),
+	// named by a dev runner stopping after it pushed (in_progress -> escalated, optional), or shown
+	// to the person approving it or sending it back to QA (escalated -> approved, awaiting_review).
+	HeadSHA string
+	// EscalatedAt is the escalation a person's decision out of escalated was made on, as the page
+	// showed it (P06 D19).
+	EscalatedAt  *time.Time
+	Branch       string     // the dispatcher's new-work claim: foreman/<ticket>/<attempt it starts>
+	BaseSHA      string     // the dispatcher's new-work claim: the default branch's head
+	Return       ReturnKind // the dispatcher's returns from a leased state
+	Method, Path string     // name the request for the request log
 }
 
 // ReturnKind is how the dispatcher returns a ticket from a leased state (P04 D9).
@@ -145,7 +151,8 @@ type ticket struct {
 	HasChildren bool
 	BaseSHA     sql.NullString
 	HeadSHA     sql.NullString
-	IsMeta      bool // projects.is_meta, read without locking the project row
+	EscalatedAt sql.NullTime // the last escalation's time, kept as history (D13)
+	IsMeta      bool         // projects.is_meta, read without locking the project row
 }
 
 func lockTicket(ctx context.Context, tx *sql.Tx, id int64) (ticket, error) {
@@ -154,9 +161,10 @@ func lockTicket(ctx context.Context, tx *sql.Tx, id int64) (ticket, error) {
 	err := tx.QueryRowContext(ctx, `
 		SELECT t.state, t.project_id, t.attempt_count, t.claim_token, t.parent_ticket_id,
 		  EXISTS (SELECT 1 FROM tickets c WHERE c.parent_ticket_id = t.id),
-		  t.base_sha, t.head_sha, p.is_meta
+		  t.base_sha, t.head_sha, t.escalated_at, p.is_meta
 		FROM tickets t JOIN projects p ON p.id = t.project_id WHERE t.id = $1 FOR UPDATE OF t`, id).
-		Scan(&s, &t.Project, &t.Attempts, &t.ClaimToken, &t.Parent, &t.HasChildren, &t.BaseSHA, &t.HeadSHA, &t.IsMeta)
+		Scan(&s, &t.Project, &t.Attempts, &t.ClaimToken, &t.Parent, &t.HasChildren, &t.BaseSHA, &t.HeadSHA,
+			&t.EscalatedAt, &t.IsMeta)
 	if errors.Is(err, sql.ErrNoRows) {
 		return t, refuse(404, "ticket %d not found", id)
 	}
@@ -207,12 +215,25 @@ func (r TransitionRequest) validate() error {
 	} else if len(r.AcceptanceCriteria) > 0 {
 		return refuse(400, "acceptance criteria are accepted only on draft -> ready")
 	}
-	if carriesCommit(r.From, r.To) {
+	switch {
+	case carriesCommit(r.From, r.To) || bindsCommit(r.From, r.To):
 		if !shaPattern.MatchString(r.HeadSHA) {
 			return refuse(400, "head_sha must name the commit: a full SHA-1 in lowercase hex")
 		}
-	} else if r.HeadSHA != "" {
-		return refuse(400, "head_sha is accepted only on in_progress -> awaiting_review and in_qa -> approved")
+	case namesCommit(r.From, r.To):
+		if r.HeadSHA != "" && !shaPattern.MatchString(r.HeadSHA) {
+			return refuse(400, "head_sha, when given, must name the commit: a full SHA-1 in lowercase hex")
+		}
+	case r.HeadSHA != "":
+		return refuse(400, "head_sha is accepted only on in_progress -> awaiting_review or escalated, in_qa -> "+
+			"approved, and a person's escalated -> approved or awaiting_review")
+	}
+	if r.From == StateEscalated {
+		if r.EscalatedAt == nil {
+			return refuse(400, "a decision out of escalated names the escalation it decides: escalated_at")
+		}
+	} else if r.EscalatedAt != nil {
+		return refuse(400, "escalated_at is accepted only on a decision out of escalated")
 	}
 	return nil
 }
@@ -257,11 +278,40 @@ func carriesCommit(from, to State) bool {
 	return (from == StateInProgress && to == StateAwaitingReview) || (from == StateInQA && to == StateApproved)
 }
 
+// bindsCommit: a person's approval, or return to QA, names the commit the page showed, and lands only
+// while it is still the ticket's head (P06 D5).
+func bindsCommit(from, to State) bool {
+	return from == StateEscalated && (to == StateApproved || to == StateAwaitingReview)
+}
+
+// namesCommit: a dev runner that must stop after pushing may name its commit as it escalates; it
+// becomes the ticket's head (P06 D21).
+func namesCommit(from, to State) bool { return from == StateInProgress && to == StateEscalated }
+
+// escalationKey is escalated_at as the request log and the event record it: UTC, RFC 3339 with its
+// fractional seconds; nil when absent.
+func escalationKey(at *time.Time) any {
+	if at == nil {
+		return nil
+	}
+	return at.UTC().Format(time.RFC3339Nano)
+}
+
+// sameEscalation holds a person's decision to the escalation it was made on (P06 D19): a ticket
+// escalated again since the page was loaded refuses it. The times compare exactly; the database
+// keeps microseconds.
+func sameEscalation(t ticket, at time.Time) error {
+	if !t.EscalatedAt.Valid || !t.EscalatedAt.Time.Equal(at) {
+		return refuse(409, "ticket %d's escalation is not the one this decision names: it changed since the page was loaded", t.ID)
+	}
+	return nil
+}
+
 func (r TransitionRequest) hash() string {
 	return requestHash(map[string]any{
 		"method": r.Method, "path": r.Path, "ticket": r.TicketID, "from": r.From, "to": r.To,
 		"payload": canonical(r.Payload), "acceptance_criteria": r.AcceptanceCriteria,
-		"claim_token": r.ClaimToken, "head_sha": r.HeadSHA,
+		"claim_token": r.ClaimToken, "head_sha": r.HeadSHA, "escalated_at": escalationKey(r.EscalatedAt),
 		"branch": r.Branch, "base_sha": r.BaseSHA, "return": r.Return,
 	})
 }
@@ -269,6 +319,10 @@ func (r TransitionRequest) hash() string {
 func validCaller(c Caller) error {
 	if c.Email == "" || c.Role == "" || c.Role == RoleCallbackAPI || c.Role == RoleRiskEvaluator {
 		return internalf("no verified caller")
+	}
+	if c.Role == RoleViewer {
+		// The viewer acts only as the person it relays, never as itself (P06 D20).
+		return refuse(403, "the viewer acts only for a person it relays")
 	}
 	if c.Role.IsRunner() && c.Project == "" {
 		return internalf("runner %s has no project", c.Email)
@@ -328,6 +382,11 @@ func (e *Engine) Transition(ctx context.Context, tx *sql.Tx, req TransitionReque
 	if t.State != req.From {
 		return Result{}, refuse(409, "ticket %d is %s, not %s", t.ID, t.State, req.From)
 	}
+	if req.From == StateEscalated {
+		if err := sameEscalation(t, *req.EscalatedAt); err != nil {
+			return Result{}, err
+		}
+	}
 	if req.From == StateEscalated && (req.To == StateReady || req.To == StateApproved || req.To == StateAwaitingReview) && t.HasChildren {
 		return Result{}, refuse(409, "ticket %d has children: it leaves escalated only for done, failed or abandoned", t.ID)
 	}
@@ -336,6 +395,10 @@ func (e *Engine) Transition(ctx context.Context, tx *sql.Tx, req TransitionReque
 	}
 	if req.From == StateEscalated && req.To == StateAwaitingReview && !t.HeadSHA.Valid {
 		return Result{}, refuse(409, "ticket %d has no submitted commit for QA to test", t.ID)
+	}
+	if bindsCommit(req.From, req.To) && req.HeadSHA != t.HeadSHA.String {
+		return Result{}, refuse(409, "ticket %d's head is %s, not %s: it changed since the page was loaded",
+			t.ID, t.HeadSHA.String, req.HeadSHA)
 	}
 	if isNewWorkClaim(row) && req.Branch != branchName(t.ID, t.Attempts+1) {
 		return Result{}, refuse(400, "ticket %d has used %d attempts: the claim's branch is %s", t.ID, t.Attempts, branchName(t.ID, t.Attempts+1))
@@ -421,6 +484,14 @@ func (e *Engine) apply(ctx context.Context, tx *sql.Tx, t ticket, row Row, req T
 		payload["requested_to"] = string(requestedTo)
 		payload["reason"] = reason
 	}
+	if req.From == StateEscalated {
+		// What the decision was bound to, written over anything of that name in the person's payload.
+		bound := map[string]any{"escalated_at": escalationKey(req.EscalatedAt)}
+		if bindsCommit(req.From, req.To) {
+			bound["head_sha"] = req.HeadSHA
+		}
+		payload["bound_to"] = bound
+	}
 
 	// Bookkeeping.
 	u.set("state = %s", string(to))
@@ -430,11 +501,16 @@ func (e *Engine) apply(ctx context.Context, tx *sql.Tx, t ticket, row Row, req T
 	var token string
 	switch {
 	case isClaim(row) && to == row.To:
+		// A claim's first window covers a Cloud Run job's start; heartbeats then extend the lease
+		// five minutes at a time (P06 D2).
 		token = newClaimToken()
 		u.set("claim_token = %s", token)
 		u.set("claimed_by = %s", req.Caller.Email)
 		u.setExpr("claimed_at = now()")
-		u.setExpr("lease_expires_at = now() + interval '5 minutes'")
+		u.setExpr("lease_expires_at = now() + interval '10 minutes'")
+	case req.From == StateClaimed && to == StateInProgress:
+		// A late start is not left seconds, and an early one keeps the rest of its window (P06 R11).
+		u.setExpr("lease_expires_at = greatest(lease_expires_at, clock_timestamp() + interval '5 minutes')")
 	case !IsLeased(to):
 		u.setExpr("claim_token = NULL")
 		u.setExpr("claimed_by = NULL")
@@ -477,6 +553,9 @@ func (e *Engine) apply(ctx context.Context, tx *sql.Tx, t ticket, row Row, req T
 		u.set("acceptance_criteria = %s::jsonb", string(ac))
 	}
 	if req.From == StateInProgress && to == StateAwaitingReview {
+		u.set("head_sha = %s", req.HeadSHA)
+	}
+	if namesCommit(req.From, to) && req.HeadSHA != "" {
 		u.set("head_sha = %s", req.HeadSHA)
 	}
 	if to == StateReady {
